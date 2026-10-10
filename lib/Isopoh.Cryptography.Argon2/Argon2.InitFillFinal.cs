@@ -354,7 +354,8 @@ public sealed partial class Argon2
     /// <summary>
     /// The loop of <see cref="FillSegment"/> over one contiguous array: blocks
     /// are slices at offset * <see cref="QwordsInBlock"/>, with no per-block
-    /// <see cref="BlockValues"/> lookups or conversions.
+    /// <see cref="BlockValues"/> lookups or conversions. Fills with AVX-512
+    /// where the runtime finds it fast, else AVX2.
     /// </summary>
     private void FillSegmentAvx2(
         Position position,
@@ -382,12 +383,16 @@ public sealed partial class Argon2
             int refLane = firstSegment ? position.Lane : (int)((uint)(pseudoRand >> 32) % lanes);
             position.Index = i;
             int refIndex = this.IndexAlpha(position, (uint)pseudoRand, refLane == position.Lane);
-            FillBlockAvx2(
-                prev,
-                all.Slice(((this.LaneBlockCount * refLane) + refIndex) * QwordsInBlock, QwordsInBlock),
-                all.Slice(curOffset * QwordsInBlock, QwordsInBlock),
-                fillBuf,
-                withXor);
+            var refSpan = all.Slice(((this.LaneBlockCount * refLane) + refIndex) * QwordsInBlock, QwordsInBlock);
+            var curSpan = all.Slice(curOffset * QwordsInBlock, QwordsInBlock);
+            if (UseAvx512)
+            {
+                FillBlockAvx512(prev, refSpan, curSpan, fillBuf, withXor);
+            }
+            else
+            {
+                FillBlockAvx2(prev, refSpan, curSpan, fillBuf, withXor);
+            }
         }
     }
 #endif

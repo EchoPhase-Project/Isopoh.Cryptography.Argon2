@@ -202,6 +202,12 @@ public sealed partial class Argon2
         }
 
 #if NET8_0_OR_GREATER
+        if (UseAvx512)
+        {
+            FillBlockAvx512(prevBlock.ReadOnlySpan, refBlock.ReadOnlySpan, nextBlock.Span, buf, withXor: false);
+            return;
+        }
+
         if (System.Runtime.Intrinsics.X86.Avx2.IsSupported)
         {
             FillBlockAvx2(prevBlock.ReadOnlySpan, refBlock.ReadOnlySpan, nextBlock.Span, buf, withXor: false);
@@ -229,6 +235,12 @@ public sealed partial class Argon2
         }
 
 #if NET8_0_OR_GREATER
+        if (UseAvx512)
+        {
+            FillBlockAvx512(prevBlock.ReadOnlySpan, refBlock.ReadOnlySpan, nextBlock.Span, buf, withXor: true);
+            return;
+        }
+
         if (System.Runtime.Intrinsics.X86.Avx2.IsSupported)
         {
             FillBlockAvx2(prevBlock.ReadOnlySpan, refBlock.ReadOnlySpan, nextBlock.Span, buf, withXor: true);
