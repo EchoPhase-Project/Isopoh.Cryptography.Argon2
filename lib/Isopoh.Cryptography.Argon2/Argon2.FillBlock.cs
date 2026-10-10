@@ -65,6 +65,142 @@ public sealed partial class Argon2
     }
 
     /// <summary>
+    /// The Blake2-based permutation P of Argon2 on a block: on each of the 8
+    /// rows of 16 qwords, then on each of the 8 columns of 2x8 qwords.
+    /// </summary>
+    /// <param name="blockR">The block, permuted in place.</param>
+    /// <param name="raw">The same block's storage, for the vectorized path.</param>
+    private static void Permute(TempBlockValues blockR, Span<ulong> raw)
+    {
+#if NET8_0_OR_GREATER
+        if (System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+        {
+            PermuteAvx2(raw);
+            return;
+        }
+#endif
+
+        PermuteScalar(blockR);
+    }
+
+    private static void PermuteScalar(TempBlockValues blockR)
+    {
+        // apply Blake2 on columns of 64-bit words:
+        //    (0,1,...,15), then
+        //    (16,17,..31)... finally
+        //    (112,113,...127)
+        for (var i = 0; i < 8; ++i)
+        {
+            ulong v0 = blockR[16 * i];
+            ulong v1 = blockR[(16 * i) + 1];
+            ulong v2 = blockR[(16 * i) + 2];
+            ulong v3 = blockR[(16 * i) + 3];
+            ulong v4 = blockR[(16 * i) + 4];
+            ulong v5 = blockR[(16 * i) + 5];
+            ulong v6 = blockR[(16 * i) + 6];
+            ulong v7 = blockR[(16 * i) + 7];
+            ulong v8 = blockR[(16 * i) + 8];
+            ulong v9 = blockR[(16 * i) + 9];
+            ulong v10 = blockR[(16 * i) + 10];
+            ulong v11 = blockR[(16 * i) + 11];
+            ulong v12 = blockR[(16 * i) + 12];
+            ulong v13 = blockR[(16 * i) + 13];
+            ulong v14 = blockR[(16 * i) + 14];
+            ulong v15 = blockR[(16 * i) + 15];
+            BlakeRoundNoMsg(
+                ref v0,
+                ref v1,
+                ref v2,
+                ref v3,
+                ref v4,
+                ref v5,
+                ref v6,
+                ref v7,
+                ref v8,
+                ref v9,
+                ref v10,
+                ref v11,
+                ref v12,
+                ref v13,
+                ref v14,
+                ref v15);
+            blockR[16 * i] = v0;
+            blockR[(16 * i) + 1] = v1;
+            blockR[(16 * i) + 2] = v2;
+            blockR[(16 * i) + 3] = v3;
+            blockR[(16 * i) + 4] = v4;
+            blockR[(16 * i) + 5] = v5;
+            blockR[(16 * i) + 6] = v6;
+            blockR[(16 * i) + 7] = v7;
+            blockR[(16 * i) + 8] = v8;
+            blockR[(16 * i) + 9] = v9;
+            blockR[(16 * i) + 10] = v10;
+            blockR[(16 * i) + 11] = v11;
+            blockR[(16 * i) + 12] = v12;
+            blockR[(16 * i) + 13] = v13;
+            blockR[(16 * i) + 14] = v14;
+            blockR[(16 * i) + 15] = v15;
+        }
+
+        // Apply Blake2 on rows of 64-bit words:
+        // (0,1,16,17,...112,113), then
+        // (2,3,18,19,...,114,115).. finally
+        // (14,15,30,31,...,126,127)
+        for (var i = 0; i < 8; ++i)
+        {
+            ulong v0 = blockR[2 * i];
+            ulong v1 = blockR[(2 * i) + 1];
+            ulong v2 = blockR[(2 * i) + 16];
+            ulong v3 = blockR[(2 * i) + 17];
+            ulong v4 = blockR[(2 * i) + 32];
+            ulong v5 = blockR[(2 * i) + 33];
+            ulong v6 = blockR[(2 * i) + 48];
+            ulong v7 = blockR[(2 * i) + 49];
+            ulong v8 = blockR[(2 * i) + 64];
+            ulong v9 = blockR[(2 * i) + 65];
+            ulong v10 = blockR[(2 * i) + 80];
+            ulong v11 = blockR[(2 * i) + 81];
+            ulong v12 = blockR[(2 * i) + 96];
+            ulong v13 = blockR[(2 * i) + 97];
+            ulong v14 = blockR[(2 * i) + 112];
+            ulong v15 = blockR[(2 * i) + 113];
+            BlakeRoundNoMsg(
+                ref v0,
+                ref v1,
+                ref v2,
+                ref v3,
+                ref v4,
+                ref v5,
+                ref v6,
+                ref v7,
+                ref v8,
+                ref v9,
+                ref v10,
+                ref v11,
+                ref v12,
+                ref v13,
+                ref v14,
+                ref v15);
+            blockR[2 * i] = v0;
+            blockR[(2 * i) + 1] = v1;
+            blockR[(2 * i) + 16] = v2;
+            blockR[(2 * i) + 17] = v3;
+            blockR[(2 * i) + 32] = v4;
+            blockR[(2 * i) + 33] = v5;
+            blockR[(2 * i) + 48] = v6;
+            blockR[(2 * i) + 49] = v7;
+            blockR[(2 * i) + 64] = v8;
+            blockR[(2 * i) + 65] = v9;
+            blockR[(2 * i) + 80] = v10;
+            blockR[(2 * i) + 81] = v11;
+            blockR[(2 * i) + 96] = v12;
+            blockR[(2 * i) + 97] = v13;
+            blockR[(2 * i) + 112] = v14;
+            blockR[(2 * i) + 113] = v15;
+        }
+    }
+
+    /// <summary>
     /// Fills <paramref name="nextBlock"/>.
     /// </summary>
     /// <param name="prevBlock">The previous block.</param>
@@ -85,119 +221,7 @@ public sealed partial class Argon2
         blockR.Xor(prevBlock);
         blockTmp.Copy(blockR);
 
-        // apply Blake2 on columns of 64-bit words:
-        //    (0,1,...,15), then
-        //    (16,17,..31)... finally
-        //    (112,113,...127)
-        for (var i = 0; i < 8; ++i)
-        {
-            ulong v0 = blockR[16 * i];
-            ulong v1 = blockR[(16 * i) + 1];
-            ulong v2 = blockR[(16 * i) + 2];
-            ulong v3 = blockR[(16 * i) + 3];
-            ulong v4 = blockR[(16 * i) + 4];
-            ulong v5 = blockR[(16 * i) + 5];
-            ulong v6 = blockR[(16 * i) + 6];
-            ulong v7 = blockR[(16 * i) + 7];
-            ulong v8 = blockR[(16 * i) + 8];
-            ulong v9 = blockR[(16 * i) + 9];
-            ulong v10 = blockR[(16 * i) + 10];
-            ulong v11 = blockR[(16 * i) + 11];
-            ulong v12 = blockR[(16 * i) + 12];
-            ulong v13 = blockR[(16 * i) + 13];
-            ulong v14 = blockR[(16 * i) + 14];
-            ulong v15 = blockR[(16 * i) + 15];
-            BlakeRoundNoMsg(
-                ref v0,
-                ref v1,
-                ref v2,
-                ref v3,
-                ref v4,
-                ref v5,
-                ref v6,
-                ref v7,
-                ref v8,
-                ref v9,
-                ref v10,
-                ref v11,
-                ref v12,
-                ref v13,
-                ref v14,
-                ref v15);
-            blockR[16 * i] = v0;
-            blockR[(16 * i) + 1] = v1;
-            blockR[(16 * i) + 2] = v2;
-            blockR[(16 * i) + 3] = v3;
-            blockR[(16 * i) + 4] = v4;
-            blockR[(16 * i) + 5] = v5;
-            blockR[(16 * i) + 6] = v6;
-            blockR[(16 * i) + 7] = v7;
-            blockR[(16 * i) + 8] = v8;
-            blockR[(16 * i) + 9] = v9;
-            blockR[(16 * i) + 10] = v10;
-            blockR[(16 * i) + 11] = v11;
-            blockR[(16 * i) + 12] = v12;
-            blockR[(16 * i) + 13] = v13;
-            blockR[(16 * i) + 14] = v14;
-            blockR[(16 * i) + 15] = v15;
-        }
-
-        // Apply Blake2 on rows of 64-bit words:
-        // (0,1,16,17,...112,113), then
-        // (2,3,18,19,...,114,115).. finally
-        // (14,15,30,31,...,126,127)
-        for (var i = 0; i < 8; ++i)
-        {
-            ulong v0 = blockR[2 * i];
-            ulong v1 = blockR[(2 * i) + 1];
-            ulong v2 = blockR[(2 * i) + 16];
-            ulong v3 = blockR[(2 * i) + 17];
-            ulong v4 = blockR[(2 * i) + 32];
-            ulong v5 = blockR[(2 * i) + 33];
-            ulong v6 = blockR[(2 * i) + 48];
-            ulong v7 = blockR[(2 * i) + 49];
-            ulong v8 = blockR[(2 * i) + 64];
-            ulong v9 = blockR[(2 * i) + 65];
-            ulong v10 = blockR[(2 * i) + 80];
-            ulong v11 = blockR[(2 * i) + 81];
-            ulong v12 = blockR[(2 * i) + 96];
-            ulong v13 = blockR[(2 * i) + 97];
-            ulong v14 = blockR[(2 * i) + 112];
-            ulong v15 = blockR[(2 * i) + 113];
-            BlakeRoundNoMsg(
-                ref v0,
-                ref v1,
-                ref v2,
-                ref v3,
-                ref v4,
-                ref v5,
-                ref v6,
-                ref v7,
-                ref v8,
-                ref v9,
-                ref v10,
-                ref v11,
-                ref v12,
-                ref v13,
-                ref v14,
-                ref v15);
-            blockR[2 * i] = v0;
-            blockR[(2 * i) + 1] = v1;
-            blockR[(2 * i) + 16] = v2;
-            blockR[(2 * i) + 17] = v3;
-            blockR[(2 * i) + 32] = v4;
-            blockR[(2 * i) + 33] = v5;
-            blockR[(2 * i) + 48] = v6;
-            blockR[(2 * i) + 49] = v7;
-            blockR[(2 * i) + 64] = v8;
-            blockR[(2 * i) + 65] = v9;
-            blockR[(2 * i) + 80] = v10;
-            blockR[(2 * i) + 81] = v11;
-            blockR[(2 * i) + 96] = v12;
-            blockR[(2 * i) + 97] = v13;
-            blockR[(2 * i) + 112] = v14;
-            blockR[(2 * i) + 113] = v15;
-        }
+        Permute(blockR, buf.Slice(0, QwordsInBlock));
 
         nextBlock.Copy(blockTmp);
         nextBlock.Xor(blockR);
@@ -217,119 +241,7 @@ public sealed partial class Argon2
         blockTmp.Copy(blockR);
         blockTmp.Xor(nextBlock); // saving the next block for XOR over
 
-        // apply Blake2 on columns of 64-bit words:
-        //    (0,1,...,15), then
-        //    (16,17,..31)... finally
-        //    (112,113,...127)
-        for (var i = 0; i < 8; ++i)
-        {
-            ulong v0 = blockR[16 * i];
-            ulong v1 = blockR[(16 * i) + 1];
-            ulong v2 = blockR[(16 * i) + 2];
-            ulong v3 = blockR[(16 * i) + 3];
-            ulong v4 = blockR[(16 * i) + 4];
-            ulong v5 = blockR[(16 * i) + 5];
-            ulong v6 = blockR[(16 * i) + 6];
-            ulong v7 = blockR[(16 * i) + 7];
-            ulong v8 = blockR[(16 * i) + 8];
-            ulong v9 = blockR[(16 * i) + 9];
-            ulong v10 = blockR[(16 * i) + 10];
-            ulong v11 = blockR[(16 * i) + 11];
-            ulong v12 = blockR[(16 * i) + 12];
-            ulong v13 = blockR[(16 * i) + 13];
-            ulong v14 = blockR[(16 * i) + 14];
-            ulong v15 = blockR[(16 * i) + 15];
-            BlakeRoundNoMsg(
-                ref v0,
-                ref v1,
-                ref v2,
-                ref v3,
-                ref v4,
-                ref v5,
-                ref v6,
-                ref v7,
-                ref v8,
-                ref v9,
-                ref v10,
-                ref v11,
-                ref v12,
-                ref v13,
-                ref v14,
-                ref v15);
-            blockR[16 * i] = v0;
-            blockR[(16 * i) + 1] = v1;
-            blockR[(16 * i) + 2] = v2;
-            blockR[(16 * i) + 3] = v3;
-            blockR[(16 * i) + 4] = v4;
-            blockR[(16 * i) + 5] = v5;
-            blockR[(16 * i) + 6] = v6;
-            blockR[(16 * i) + 7] = v7;
-            blockR[(16 * i) + 8] = v8;
-            blockR[(16 * i) + 9] = v9;
-            blockR[(16 * i) + 10] = v10;
-            blockR[(16 * i) + 11] = v11;
-            blockR[(16 * i) + 12] = v12;
-            blockR[(16 * i) + 13] = v13;
-            blockR[(16 * i) + 14] = v14;
-            blockR[(16 * i) + 15] = v15;
-        }
-
-        // Apply Blake2 on rows of 64-bit words:
-        // (0,1,16,17,...112,113), then
-        // (2,3,18,19,...,114,115).. finally
-        // (14,15,30,31,...,126,127)
-        for (var i = 0; i < 8; ++i)
-        {
-            ulong v0 = blockR[2 * i];
-            ulong v1 = blockR[(2 * i) + 1];
-            ulong v2 = blockR[(2 * i) + 16];
-            ulong v3 = blockR[(2 * i) + 17];
-            ulong v4 = blockR[(2 * i) + 32];
-            ulong v5 = blockR[(2 * i) + 33];
-            ulong v6 = blockR[(2 * i) + 48];
-            ulong v7 = blockR[(2 * i) + 49];
-            ulong v8 = blockR[(2 * i) + 64];
-            ulong v9 = blockR[(2 * i) + 65];
-            ulong v10 = blockR[(2 * i) + 80];
-            ulong v11 = blockR[(2 * i) + 81];
-            ulong v12 = blockR[(2 * i) + 96];
-            ulong v13 = blockR[(2 * i) + 97];
-            ulong v14 = blockR[(2 * i) + 112];
-            ulong v15 = blockR[(2 * i) + 113];
-            BlakeRoundNoMsg(
-                ref v0,
-                ref v1,
-                ref v2,
-                ref v3,
-                ref v4,
-                ref v5,
-                ref v6,
-                ref v7,
-                ref v8,
-                ref v9,
-                ref v10,
-                ref v11,
-                ref v12,
-                ref v13,
-                ref v14,
-                ref v15);
-            blockR[2 * i] = v0;
-            blockR[(2 * i) + 1] = v1;
-            blockR[(2 * i) + 16] = v2;
-            blockR[(2 * i) + 17] = v3;
-            blockR[(2 * i) + 32] = v4;
-            blockR[(2 * i) + 33] = v5;
-            blockR[(2 * i) + 48] = v6;
-            blockR[(2 * i) + 49] = v7;
-            blockR[(2 * i) + 64] = v8;
-            blockR[(2 * i) + 65] = v9;
-            blockR[(2 * i) + 80] = v10;
-            blockR[(2 * i) + 81] = v11;
-            blockR[(2 * i) + 96] = v12;
-            blockR[(2 * i) + 97] = v13;
-            blockR[(2 * i) + 112] = v14;
-            blockR[(2 * i) + 113] = v15;
-        }
+        Permute(blockR, buf.Slice(0, QwordsInBlock));
 
         nextBlock.Copy(blockTmp);
         nextBlock.Xor(blockR);
