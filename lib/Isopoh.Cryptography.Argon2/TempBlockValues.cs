@@ -58,6 +58,11 @@ public readonly ref struct TempBlockValues
     }
 
     /// <summary>
+    /// Gets the block's storage, for the vectorized fill.
+    /// </summary>
+    internal Span<ulong> Span => this.span;
+
+    /// <summary>
     /// Gets or sets the ulong element at the specified index.
     /// </summary>
     /// <param name="i">

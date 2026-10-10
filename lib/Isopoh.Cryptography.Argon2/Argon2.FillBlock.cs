@@ -69,21 +69,7 @@ public sealed partial class Argon2
     /// rows of 16 qwords, then on each of the 8 columns of 2x8 qwords.
     /// </summary>
     /// <param name="blockR">The block, permuted in place.</param>
-    /// <param name="raw">The same block's storage, for the vectorized path.</param>
-    private static void Permute(TempBlockValues blockR, Span<ulong> raw)
-    {
-#if NET8_0_OR_GREATER
-        if (System.Runtime.Intrinsics.X86.Avx2.IsSupported)
-        {
-            PermuteAvx2(raw);
-            return;
-        }
-#endif
-
-        PermuteScalar(blockR);
-    }
-
-    private static void PermuteScalar(TempBlockValues blockR)
+    private static void Permute(TempBlockValues blockR)
     {
         // apply Blake2 on columns of 64-bit words:
         //    (0,1,...,15), then
@@ -215,13 +201,21 @@ public sealed partial class Argon2
             throw new ArgumentException($"Expected length of {QwordsInBlock}, got {buf.Length}");
         }
 
+#if NET8_0_OR_GREATER
+        if (System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+        {
+            FillBlockAvx2(prevBlock.ReadOnlySpan, refBlock.ReadOnlySpan, nextBlock.Span, buf, withXor: false);
+            return;
+        }
+#endif
+
         var blockR = new TempBlockValues(buf.Slice(0, QwordsInBlock));
         var blockTmp = new TempBlockValues(buf.Slice(QwordsInBlock, QwordsInBlock));
         blockR.Copy(refBlock);
         blockR.Xor(prevBlock);
         blockTmp.Copy(blockR);
 
-        Permute(blockR, buf.Slice(0, QwordsInBlock));
+        Permute(blockR);
 
         nextBlock.Copy(blockTmp);
         nextBlock.Xor(blockR);
@@ -234,6 +228,14 @@ public sealed partial class Argon2
             throw new ArgumentException($"Expected length of {QwordsInBlock}, got {buf.Length}");
         }
 
+#if NET8_0_OR_GREATER
+        if (System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+        {
+            FillBlockAvx2(prevBlock.ReadOnlySpan, refBlock.ReadOnlySpan, nextBlock.Span, buf, withXor: true);
+            return;
+        }
+#endif
+
         var blockR = new TempBlockValues(buf.Slice(0, QwordsInBlock));
         var blockTmp = new TempBlockValues(buf.Slice(QwordsInBlock, QwordsInBlock));
         blockR.Copy(refBlock);
@@ -241,7 +243,7 @@ public sealed partial class Argon2
         blockTmp.Copy(blockR);
         blockTmp.Xor(nextBlock); // saving the next block for XOR over
 
-        Permute(blockR, buf.Slice(0, QwordsInBlock));
+        Permute(blockR);
 
         nextBlock.Copy(blockTmp);
         nextBlock.Xor(blockR);

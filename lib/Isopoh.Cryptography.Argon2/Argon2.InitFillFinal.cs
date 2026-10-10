@@ -304,6 +304,14 @@ public sealed partial class Argon2
         int prevOffset = curOffset % this.LaneBlockCount == 0 ? curOffset + this.LaneBlockCount - 1 : curOffset - 1;
 
         Span<ulong> fillBuf = buf.Slice(0, 2 * QwordsInBlock);
+#if NET8_0_OR_GREATER
+        if (System.Runtime.Intrinsics.X86.Avx2.IsSupported && this.Memory.TryGetContiguous(out Memory<ulong> contiguous))
+        {
+            this.FillSegmentAvx2(position, contiguous.Span, pseudoRands, dataIndependentAddressing, startingIndex, curOffset, prevOffset, fillBuf);
+            return;
+        }
+#endif
+
         for (int i = startingIndex; i < this.SegmentBlockCount; ++i, ++curOffset, ++prevOffset)
         {
             if (curOffset % this.LaneBlockCount == 1)
@@ -341,6 +349,48 @@ public sealed partial class Argon2
             }
         }
     }
+
+#if NET8_0_OR_GREATER
+    /// <summary>
+    /// The loop of <see cref="FillSegment"/> over one contiguous array: blocks
+    /// are slices at offset * <see cref="QwordsInBlock"/>, with no per-block
+    /// <see cref="BlockValues"/> lookups or conversions.
+    /// </summary>
+    private void FillSegmentAvx2(
+        Position position,
+        Span<ulong> all,
+        Span<ulong> pseudoRands,
+        bool dataIndependentAddressing,
+        int startingIndex,
+        int curOffset,
+        int prevOffset,
+        Span<ulong> fillBuf)
+    {
+        // version 1.2.1 and earlier overwrite; later versions XOR over after the first pass
+        bool withXor = this.memory.Version != Argon2Version.Sixteen && position.Pass != 0;
+        bool firstSegment = position is { Pass: 0, Slice: 0 };
+        uint lanes = (uint)this.memory.Lanes;
+        for (int i = startingIndex; i < this.SegmentBlockCount; ++i, ++curOffset, ++prevOffset)
+        {
+            if (curOffset % this.LaneBlockCount == 1)
+            {
+                prevOffset = curOffset - 1;
+            }
+
+            Span<ulong> prev = all.Slice(prevOffset * QwordsInBlock, QwordsInBlock);
+            ulong pseudoRand = dataIndependentAddressing ? pseudoRands[i] : prev[0];
+            int refLane = firstSegment ? position.Lane : (int)((uint)(pseudoRand >> 32) % lanes);
+            position.Index = i;
+            int refIndex = this.IndexAlpha(position, (uint)pseudoRand, refLane == position.Lane);
+            FillBlockAvx2(
+                prev,
+                all.Slice(((this.LaneBlockCount * refLane) + refIndex) * QwordsInBlock, QwordsInBlock),
+                all.Slice(curOffset * QwordsInBlock, QwordsInBlock),
+                fillBuf,
+                withXor);
+        }
+    }
+#endif
 
     private int IndexAlpha(Position position, uint pseudoRand, bool sameLane)
     {

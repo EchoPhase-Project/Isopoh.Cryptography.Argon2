@@ -92,4 +92,23 @@ public class Blocks
 
         return true;
     }
+
+    /// <summary>
+    /// Gets the single array under all the blocks, when there is one (any
+    /// memory under 2 GiB), so a hot loop can address blocks by offset
+    /// instead of going through a <see cref="BlockValues"/> per block.
+    /// </summary>
+    /// <param name="memory">The array, block i at qword i * <see cref="Argon2.QwordsInBlock"/>.</param>
+    /// <returns>True if the blocks lie over one array.</returns>
+    internal bool TryGetContiguous(out Memory<ulong> memory)
+    {
+        if (this.memories.Length == 1)
+        {
+            memory = this.memories[0];
+            return true;
+        }
+
+        memory = default;
+        return false;
+    }
 }
