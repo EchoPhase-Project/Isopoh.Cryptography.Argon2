@@ -703,7 +703,7 @@ public sealed class Argon2Memory
 
             this.blockSecureArrays.Add(lastSecureArray);
             this.blockMemories.Add(lastSecureArray.Buffer);
-            this.Blocks = new Blocks(this.blockMemories);
+            this.Blocks = this.Blocks.IsOver(this.blockMemories) ? this.Blocks : new Blocks(this.blockMemories);
         }
         catch (OutOfMemoryException e)
         {
@@ -793,7 +793,7 @@ public sealed class Argon2Memory
             }
 
             this.blockMemories.Add(lastMemory);
-            this.Blocks = new Blocks(this.blockMemories);
+            this.Blocks = this.Blocks.IsOver(this.blockMemories) ? this.Blocks : new Blocks(this.blockMemories);
         }
         catch (OutOfMemoryException e)
         {

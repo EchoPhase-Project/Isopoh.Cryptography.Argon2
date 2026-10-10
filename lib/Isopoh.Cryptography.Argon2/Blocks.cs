@@ -8,6 +8,7 @@ namespace Isopoh.Cryptography.Argon2;
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 /// <summary>
 /// Break a byte array into blocks for Argon2 to use.
@@ -21,6 +22,12 @@ public class Blocks
     private readonly BlockValues[] blockValues;
 
     /// <summary>
+    /// The arrays under <see cref="blockValues"/>, to tell whether a reset
+    /// kept them (see <see cref="IsOver"/>).
+    /// </summary>
+    private readonly Memory<ulong>[] memories;
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="Blocks"/> class.
     /// </summary>
     /// <param name="memories">
@@ -28,9 +35,10 @@ public class Blocks
     /// </param>
     public Blocks(IEnumerable<Memory<ulong>> memories)
     {
+        this.memories = memories.ToArray();
         var bvs = new List<BlockValues>();
         var blockIndex = 0;
-        foreach (Memory<ulong> memory in memories)
+        foreach (Memory<ulong> memory in this.memories)
         {
             int maxBlockIndex = blockIndex + (memory.Length / Argon2.QwordsInBlock);
             for (int i = blockIndex; i < maxBlockIndex; ++i)
@@ -59,4 +67,29 @@ public class Blocks
     /// The requested <see cref="BlockValues"/> element.
     /// </returns>
     public BlockValues this[int i] => this.blockValues[i];
+
+    /// <summary>
+    /// Whether these blocks lie over exactly <paramref name="other"/>, so a
+    /// reset that kept its arrays can keep the blocks too instead of creating
+    /// a <see cref="BlockValues"/> per block again.
+    /// </summary>
+    /// <param name="other">The arrays to compare with.</param>
+    /// <returns>True if the arrays are the same ones, in the same order.</returns>
+    internal bool IsOver(IReadOnlyList<Memory<ulong>> other)
+    {
+        if (other.Count != this.memories.Length)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < this.memories.Length; ++i)
+        {
+            if (!this.memories[i].Equals(other[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 }
