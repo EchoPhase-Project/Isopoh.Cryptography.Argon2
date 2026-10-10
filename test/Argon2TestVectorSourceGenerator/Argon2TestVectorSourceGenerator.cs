@@ -397,54 +397,35 @@ public class Argon2TestVectorSourceGenerator : IIncrementalGenerator
     {
         var result = string.Empty;
 
-        if (Environment.OSVersion.Platform == PlatformID.Unix
-            ||
-            Environment.OSVersion.Platform == PlatformID.MacOSX)
+        // .NET's Process parses Arguments the same way on every platform (quotes
+        // and backslashes, as on Windows), not with shell rules: the former Unix
+        // branch escaped spaces as "\\ ", which split such arguments in two.
+        foreach (string arg in args.Where(s => s != null).Cast<string>())
         {
-            result = args.Where(s => s != null)
-                .Cast<string>()
-                .Aggregate(
-                    result,
-                    (current, arg) => current + ((current.Length > 0 ? " " : string.Empty) + arg.Replace(" ", @"\ ")
-                        .Replace("\t", "\\\t")
-                        .Replace(@"\", @"\\")
-                        .Replace(@"""", @"\""")
-                        .Replace("<", @"\<")
-                        .Replace(">", @"\>")
-                        .Replace("|", @"\|")
-                        .Replace("@", @"\@")
-                        .Replace("&", @"\&")));
-        }
-        else
-        {
-            // Windows family
-            foreach (string arg in args.Where(s => s != null).Cast<string>())
+            bool enclosedInApo = arg.LastIndexOfAny(
+                [' ', '\t', '|', '@', '^', '<', '>', '&']) >= 0;
+            bool wasApo = enclosedInApo;
+            var subResult = string.Empty;
+            for (int i = arg.Length - 1; i >= 0; i--)
             {
-                bool enclosedInApo = arg.LastIndexOfAny(
-                    [' ', '\t', '|', '@', '^', '<', '>', '&']) >= 0;
-                bool wasApo = enclosedInApo;
-                var subResult = string.Empty;
-                for (int i = arg.Length - 1; i >= 0; i--)
+                switch (arg[i])
                 {
-                    switch (arg[i])
-                    {
-                        case '"':
-                            subResult = @"\""" + subResult;
-                            wasApo = true;
-                            break;
-                        case '\\':
-                            subResult = (wasApo ? @"\\" : @"\") + subResult;
-                            break;
-                        default:
-                            subResult = arg[i] + subResult;
-                            wasApo = false;
-                            break;
-                    }
+                    case '"':
+                        subResult = @"\""" + subResult;
+                        wasApo = true;
+                        break;
+                    case '\\':
+                        subResult = (wasApo ? @"\\" : @"\") + subResult;
+                        break;
+                    default:
+                        subResult = arg[i] + subResult;
+                        wasApo = false;
+                        break;
                 }
-
-                result += (result.Length > 0 ? " " : string.Empty)
-                    + (enclosedInApo ? "\"" + subResult + "\"" : subResult);
             }
+
+            result += (result.Length > 0 ? " " : string.Empty)
+                + (enclosedInApo ? "\"" + subResult + "\"" : subResult);
         }
 
         return result;
