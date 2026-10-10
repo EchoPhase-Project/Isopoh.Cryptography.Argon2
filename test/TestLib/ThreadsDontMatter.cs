@@ -6,6 +6,7 @@
 
 namespace TestLib;
 
+using System.Security.Cryptography;
 using System.Text;
 using Isopoh.Cryptography.Argon2;
 using Isopoh.Cryptography.SecureArray;
@@ -27,11 +28,17 @@ public static class ThreadsDontMatter
     {
         const string password = "password1";
         byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+
+        // One random salt for both: a config without one draws its own random
+        // salt, which would make the hashes differ for a reason unrelated to
+        // threads.
+        byte[] salt = RandomNumberGenerator.GetBytes(16);
         var configA = new Argon2Config
         {
             Type = Argon2Type.DataIndependentAddressing,
             Version = Argon2Version.Nineteen,
             Password = passwordBytes,
+            Salt = salt,
             TimeCost = 3,
             MemoryCost = 32,
             Lanes = 4,
@@ -43,6 +50,7 @@ public static class ThreadsDontMatter
             Type = Argon2Type.DataIndependentAddressing,
             Version = Argon2Version.Nineteen,
             Password = passwordBytes,
+            Salt = salt,
             TimeCost = 3,
             MemoryCost = 32,
             Lanes = 4,
