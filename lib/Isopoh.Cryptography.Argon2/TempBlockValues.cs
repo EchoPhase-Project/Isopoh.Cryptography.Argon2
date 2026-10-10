@@ -97,11 +97,7 @@ public readonly ref struct TempBlockValues
     /// </param>
     public void Xor(ReadOnlyBlockValues other)
     {
-        var otherSpan = other.ReadOnlySpan;
-        for (var i = 0; i < Argon2.QwordsInBlock; ++i)
-        {
-            this.span[i] ^= otherSpan[i];
-        }
+        BlockOps.Xor(this.span, other.ReadOnlySpan);
     }
 
     /// <summary>

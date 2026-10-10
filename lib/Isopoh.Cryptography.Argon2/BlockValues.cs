@@ -83,11 +83,8 @@ public sealed class BlockValues
     /// </param>
     public void Xor(ReadOnlyBlockValues other)
     {
-        var otherSpan = other.ReadOnlySpan;
-        for (var i = 0; i < Argon2.QwordsInBlock; ++i)
-        {
-            this.memory.Span[i] ^= otherSpan[i];
-        }
+        // One Span for the whole block: memory.Span per element was a hot cost.
+        BlockOps.Xor(this.memory.Span, other.ReadOnlySpan);
     }
 
     /// <summary>
