@@ -95,9 +95,9 @@ public static class LeakInVerify
         }
 
         var errs = new List<string>();
-        if (memoryDiff.All(v => v > 0))
+        if (MemoryGrowth.Leak(memoryDiff) is { } leak)
         {
-            errs.Add($"Leaked {memoryDiff.Min()} bytes. [{string.Join(", ", memoryDiff.Select(v => $"{v}"))}].");
+            errs.Add(leak);
         }
 
         if (badLocks.Any())
