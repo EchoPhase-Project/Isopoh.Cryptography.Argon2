@@ -643,10 +643,12 @@ public sealed class Argon2Memory
         }
 
         var currentMemoryBlockCount = this.blockMemories.Aggregate(0UL, (sum, m) => sum + (ulong)(m.Length / Argon2.QwordsInBlock));
-        if (requiredMemoryBlockCount > currentMemoryBlockCount && this.ShrinkMemoryPolicy == Argon2MemoryPolicy.Shrink)
+        bool shrink = this.ShrinkMemoryPolicy == Argon2MemoryPolicy.Shrink;
+        if (shrink && requiredMemoryBlockCount < currentMemoryBlockCount)
         {
+            // Drop whole trailing arrays the new size does not reach.
             var remainingMemoryBlockCount = currentMemoryBlockCount;
-            while (true)
+            while (this.blockMemories.Count > 1)
             {
                 var lastMemoryBlockCount = (ulong)(this.blockMemories[this.blockMemories.Count - 1].Length / Argon2.QwordsInBlock);
                 if (remainingMemoryBlockCount - lastMemoryBlockCount < requiredMemoryBlockCount)
@@ -654,6 +656,8 @@ public sealed class Argon2Memory
                     break;
                 }
 
+                remainingMemoryBlockCount -= lastMemoryBlockCount;
+                this.blockSecureArrays[this.blockSecureArrays.Count - 1].Dispose();
                 this.blockSecureArrays.RemoveAt(this.blockSecureArrays.Count - 1);
                 this.blockMemories.RemoveAt(this.blockMemories.Count - 1);
             }
@@ -693,8 +697,10 @@ public sealed class Argon2Memory
                 this.blockMemories.Add(secureArray.Buffer);
             }
 
-            if (lastMemoryBlockCount > lastSecureArray.Buffer.Length / Argon2.QwordsInBlock)
+            int lastCapacity = lastSecureArray.Buffer.Length / Argon2.QwordsInBlock;
+            if (lastMemoryBlockCount > lastCapacity || (shrink && lastMemoryBlockCount < lastCapacity))
             {
+                lastSecureArray.Dispose();
                 lastSecureArray = SecureArray<ulong>.Create(
                     lastMemoryBlockCount * Argon2.QwordsInBlock,
                     this.secureArrayCall,
@@ -749,10 +755,12 @@ public sealed class Argon2Memory
         // | Memory (2GB)                      | Memory (2GB)
         // +-----------------------------------+--------------------------------
         var currentMemoryBlockCount = this.blockMemories.Aggregate(0UL, (sum, m) => sum + (ulong)(m.Length / Argon2.QwordsInBlock));
-        if (requiredMemoryBlockCount > currentMemoryBlockCount && this.ShrinkMemoryPolicy == Argon2MemoryPolicy.Shrink)
+        bool shrink = this.ShrinkMemoryPolicy == Argon2MemoryPolicy.Shrink;
+        if (shrink && requiredMemoryBlockCount < currentMemoryBlockCount)
         {
+            // Drop whole trailing arrays the new size does not reach.
             var remainingMemoryBlockCount = currentMemoryBlockCount;
-            while (true)
+            while (this.blockMemories.Count > 1)
             {
                 var lastMemoryBlockCount = (ulong)(this.blockMemories[this.blockMemories.Count - 1].Length / Argon2.QwordsInBlock);
                 if (remainingMemoryBlockCount - lastMemoryBlockCount < requiredMemoryBlockCount)
@@ -760,6 +768,7 @@ public sealed class Argon2Memory
                     break;
                 }
 
+                remainingMemoryBlockCount -= lastMemoryBlockCount;
                 this.blockMemories.RemoveAt(this.blockMemories.Count - 1);
             }
         }
@@ -787,7 +796,8 @@ public sealed class Argon2Memory
                 this.blockMemories.Add(new ulong[CsharpMaxBlocksPerArray * Argon2.QwordsInBlock]);
             }
 
-            if (lastMemoryBlockCount > lastMemory.Length / Argon2.QwordsInBlock)
+            int lastCapacity = lastMemory.Length / Argon2.QwordsInBlock;
+            if (lastMemoryBlockCount > lastCapacity || (shrink && lastMemoryBlockCount < lastCapacity))
             {
                 lastMemory = new ulong[lastMemoryBlockCount * Argon2.QwordsInBlock];
             }
