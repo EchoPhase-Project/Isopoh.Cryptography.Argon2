@@ -38,6 +38,25 @@ jobs:
           cmake --preset release
           cmake --build --preset release-build --target argon2
 
+      # Coverage of the library only, not of the test assemblies. VSTest 18 no
+      # longer takes the collector's settings inline, so they go in a file.
+      - name: Coverage settings
+        run: |
+          cat > coverage.runsettings <<'XML'
+          <RunSettings>
+            <DataCollectionRunSettings>
+              <DataCollectors>
+                <DataCollector friendlyName="XPlat code coverage">
+                  <Configuration>
+                    <Format>cobertura</Format>
+                    <Include>[Isopoh.Cryptography.*]*</Include>
+                  </Configuration>
+                </DataCollector>
+              </DataCollectors>
+            </DataCollectionRunSettings>
+          </RunSettings>
+          XML
+
       # The whole managed suite except the memory leak test, which measures the
       # process and is meaningless (and slow) under the coverage collector.
       - name: Tests with coverage
@@ -47,8 +66,8 @@ jobs:
           dotnet test test/Isopoh.Cryptography.Test/Isopoh.Cryptography.Test.csproj
           -c Release -p:GeneratePackageOnBuild=false -p:UseSharedCompilation=false
           --filter "FullyQualifiedName!~TestLeaking"
-          --collect:"XPlat Code Coverage" --results-directory coverage
-          -- DataCollectionRunSettings.DataCollector.Configuration.Include="[Isopoh.Cryptography.*]*"
+          --collect:"XPlat Code Coverage" --settings coverage.runsettings
+          --results-directory coverage
 
       - name: Upload coverage to Codecov
         if: ${{ !cancelled() }}
