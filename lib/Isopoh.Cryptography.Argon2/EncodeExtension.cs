@@ -231,7 +231,7 @@ public static class EncodeExtension
         dst.Append($"{lanes:D}");
         if (keyId.Length > 0)
         {
-            dst.Append(",data=");
+            dst.Append(",keyid=");
             dst.Append(keyId.ToB64String());
         }
 

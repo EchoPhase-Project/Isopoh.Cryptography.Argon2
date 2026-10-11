@@ -40,15 +40,13 @@
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <ProduceReferenceAssembly>True</ProduceReferenceAssembly>
     <LangVersion>latest</LangVersion>
+    <!-- Zero(Span<T>) pins the span with fixed to hand its address to SecureArrayCall. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <PropertyGroup Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net10.0'))">
     <IsAotCompatible>true</IsAotCompatible>
     <VerifyReferenceAotCompatibility>true</VerifyReferenceAotCompatibility>
-  </PropertyGroup>
-
-  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Release|netstandard1.2|AnyCPU'">
-    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>

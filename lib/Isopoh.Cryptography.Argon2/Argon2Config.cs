@@ -288,6 +288,7 @@ public sealed class Argon2Config : ICloneable
             Salt = CloneArray(this.Salt),
             Secret = CloneArray(this.Secret),
             AssociatedData = CloneArray(this.AssociatedData),
+            KeyIdentifier = CloneArray(this.KeyIdentifier),
             TimeCost = this.TimeCost,
             MemoryCost = this.MemoryCost,
             Lanes = this.Lanes,

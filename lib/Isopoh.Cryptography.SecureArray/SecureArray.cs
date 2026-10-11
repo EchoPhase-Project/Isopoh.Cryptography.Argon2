@@ -266,19 +266,21 @@ public class SecureArray
     /// <param name="call">
     /// The methods to call to secure the array. Defaults to <see cref="SecureArray"/>.<see cref="SecureArray.DefaultCall"/>.
     /// </param>
-    public static void Zero<T>(Span<T> buffer, SecureArrayCall? call = null)
+    public static unsafe void Zero<T>(Span<T> buffer, SecureArrayCall? call = null)
         where T : struct
     {
-        GCHandle bufHandle = GCHandle.Alloc(buffer.GetPinnableReference(), GCHandleType.Pinned);
-        try
+        // Pin the span's own memory. GCHandle.Alloc(buffer.GetPinnableReference())
+        // boxed a copy of the first element: that copy was zeroed instead of the
+        // span, and Length * size bytes were written from it into the heap.
+        int sizeInBytes = buffer.Length * BuiltInTypeElementSize(buffer);
+        if (sizeInBytes == 0)
         {
-            IntPtr bufPtr = bufHandle.AddrOfPinnedObject();
-            var cnt = new UIntPtr((uint)buffer.Length * (uint)BuiltInTypeElementSize(buffer));
-            (call?.ZeroMemory ?? DefaultCall.ZeroMemory)(bufPtr, cnt);
+            return;
         }
-        finally
+
+        fixed (byte* bufPtr = MemoryMarshal.AsBytes(buffer))
         {
-            bufHandle.Free();
+            (call?.ZeroMemory ?? DefaultCall.ZeroMemory)((IntPtr)bufPtr, new UIntPtr((uint)sizeInBytes));
         }
     }
 
