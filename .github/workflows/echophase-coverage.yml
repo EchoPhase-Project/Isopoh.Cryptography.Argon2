@@ -15,7 +15,7 @@ permissions:
 jobs:
   coverage:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -57,15 +57,19 @@ jobs:
           </RunSettings>
           XML
 
-      # The whole managed suite except the memory leak test, which measures the
-      # process and is meaningless (and slow) under the coverage collector.
+      # The managed suite without three tests that measure rather than check,
+      # and that coverage instrumentation (a counter on every line of the block
+      # fill loops, ~40x slower) turns from seconds into tens of minutes:
+      # TestLeaking (process memory), TestParallelismTiming (timings) and
+      # TestHighMemoryCost (hashes ~16 GiB twice; also more than a hosted
+      # runner's RAM). The upstream CI and local runs still cover them.
       - name: Tests with coverage
         env:
           REFERENCE_RUN_PATH: ${{ github.workspace }}/Reference/bin/Release/argon2
         run: >
           dotnet test test/Isopoh.Cryptography.Test/Isopoh.Cryptography.Test.csproj
           -c Release -p:GeneratePackageOnBuild=false -p:UseSharedCompilation=false
-          --filter "FullyQualifiedName!~TestLeaking"
+          --filter "FullyQualifiedName!~TestLeaking&FullyQualifiedName!~TestParallelismTiming&FullyQualifiedName!~TestHighMemoryCost"
           --collect:"XPlat Code Coverage" --settings coverage.runsettings
           --results-directory coverage
 
