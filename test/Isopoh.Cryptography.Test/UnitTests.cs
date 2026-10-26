@@ -76,9 +76,14 @@ public class UnitTests
     }
 
     /// <summary>
-    /// Test <see cref="Argon2"/>.
+    /// Time the hash for each parallelism from 1 to 20 (a report; it cannot fail).
     /// </summary>
+    /// <remarks>
+    /// It takes more than 10 seconds: CI runs it apart from the fast tests,
+    /// with the filter <c>Category=Slow</c>.
+    /// </remarks>
     [Fact]
+    [Trait("Category", "Slow")]
     public void TestParallelismTiming()
     {
         (bool passed, string text) = TimeToHash.Test(this.output);
@@ -86,12 +91,55 @@ public class UnitTests
     }
 
     /// <summary>
-    /// Test <see cref="Argon2"/>.
+    /// Test <see cref="Argon2"/> against the vectors the source generator made
+    /// with the C reference implementation at build time.
     /// </summary>
     [Fact]
-    public void TestLeaking()
+    public void TestVersusReferenceCode()
     {
-        (bool passed, string text) = LeakInVerify.Test(this.output);
+        Assert.NotEmpty(new global::Argon2TestVector.Test().Argon2Vectors);
+        (bool passed, string text) = VersusReferenceCode.Test(this.output);
+        Assert.True(passed, text);
+    }
+
+    /// <summary>
+    /// Test <see cref="Argon2"/> against the vectors of draft-irtf-cfrg-argon2-03.
+    /// </summary>
+    [Fact]
+    public void TestFromDraft3()
+    {
+        (bool passed, string text) = FromDraft3.Test(this.output);
+        Assert.True(passed, text);
+    }
+
+    /// <summary>
+    /// Hashing again with the same <see cref="Argon2Memory"/> allocates no more secure memory.
+    /// </summary>
+    [Fact]
+    public void TestMemoryNoAlloc()
+    {
+        (bool passed, string text) = MemoryNoAlloc.Test(this.output);
+        Assert.True(passed, text);
+    }
+
+    /// <summary>
+    /// Test BLAKE2b against the reference keyed test vectors, in pieces, with each buffer kind.
+    /// </summary>
+    [Fact]
+    public void TestBlake2bTestVector()
+    {
+        (bool passed, string text) = Blake2bTestVector.Test(this.output);
+        Assert.True(passed, text);
+    }
+
+    /// <summary>
+    /// Test that each BLAKE2b entry point gives the same result for many
+    /// data, key, salt and output lengths.
+    /// </summary>
+    [Fact]
+    public void TestBlake2bTestVariations()
+    {
+        (bool passed, string text) = Blake2BTestVariations.Test(this.output);
         Assert.True(passed, text);
     }
 
@@ -197,7 +245,12 @@ public class UnitTests
     /// <summary>
     /// Make sure can work with more RAM than C# can allocate in a single chunk.
     /// </summary>
+    /// <remarks>
+    /// It needs more than 2 GiB of memory: CI excludes it with the filter
+    /// <c>Category!=HighMemory</c>.
+    /// </remarks>
     [Fact]
+    [Trait("Category", "HighMemory")]
     public void TestHighMemoryCost()
     {
         (bool passed, string text) = HighMemoryCost.Test(this.output);

@@ -129,6 +129,73 @@ public class SecureArrayTests
     }
 
     /// <summary>
+    /// Zeroing a slice leaves the elements around it alone.
+    /// </summary>
+    [Fact]
+    public void ZeroSliceKeepsNeighbours()
+    {
+        var call = new FakeCall(lockLimit: int.MaxValue);
+        var ints = new[] { 1, 2, 3, 4, 5, 6 };
+        SecureArray.Zero(ints.AsSpan(2, 3), call);
+        Assert.Equal(new[] { 1, 2, 0, 0, 0, 6 }, ints);
+        var bytes = new byte[] { 7, 8, 9 };
+        SecureArray.Zero(bytes.AsSpan(1, 1), call);
+        Assert.Equal(new byte[] { 7, 0, 9 }, bytes);
+    }
+
+    /// <summary>
+    /// The byte count passed to ZeroMemory does not wrap for spans of 2 GiB or
+    /// more. The span is fake (it covers one real element) and the call only
+    /// records the count, so nothing that large is allocated or written.
+    /// </summary>
+    /// <param name="length">The number of ulong elements in the span.</param>
+    [Theory]
+    [InlineData(1 << 29)]
+    [InlineData((1 << 28) + 1)]
+    [InlineData(int.MaxValue)]
+    public void ZeroLargeSpanByteCount(int length)
+    {
+        if (!Environment.Is64BitProcess)
+        {
+            return; // a 32-bit nuint cannot hold the count
+        }
+
+        nuint zeroed = 0;
+        int calls = 0;
+        var call = new SecureArrayCall(
+            (m, l) =>
+            {
+                ++calls;
+                zeroed = l;
+            },
+            (m, l) => null,
+            (m, l) => { },
+            "Recording");
+        var element = new ulong[1];
+        Span<ulong> span = MemoryMarshal.CreateSpan(ref MemoryMarshal.GetArrayDataReference(element), length);
+        SecureArray.Zero(span, call);
+        Assert.Equal(1, calls);
+        Assert.Equal((nuint)length * sizeof(ulong), zeroed);
+    }
+
+    /// <summary>
+    /// A second dispose of a locked array does not unlock it again.
+    /// </summary>
+    [Fact]
+    public void DoubleDisposeUnlocksOnce()
+    {
+        var call = new FakeCall(lockLimit: int.MaxValue);
+        var locked = new SecureArray<byte>(16, SecureArrayType.ZeroedPinnedAndNoSwap, call);
+        Assert.Equal(1, call.Locks);
+        locked.Buffer[3] = 42;
+        locked.Dispose();
+        Assert.Equal(1, call.Unlocks);
+        Assert.Equal(new byte[16], locked.Buffer);
+        locked.Dispose();
+        Assert.Equal(1, call.Unlocks);
+    }
+
+    /// <summary>
     /// The constructors that take the default call, and zeroing an empty span.
     /// </summary>
     [Fact]
@@ -164,6 +231,35 @@ public class SecureArrayTests
         using var array = SecureArray<byte>.Best(32, null);
         Assert.Same(call, array.Call);
         array.Call = call;
+    }
+
+    /// <summary>
+    /// Zero on stack memory: the real (default) call zeroes exactly the span,
+    /// and leaves the stack bytes on both sides of it alone.
+    /// </summary>
+    [Fact]
+    public void ZeroStackallocSpan()
+    {
+        Span<byte> bytes = stackalloc byte[64];
+        bytes.Fill(0xA5);
+        SecureArray.Zero(bytes.Slice(8, 48));
+        Assert.True(bytes.Slice(0, 8).IndexOfAnyExcept((byte)0xA5) < 0);
+        Assert.True(bytes.Slice(8, 48).IndexOfAnyExcept((byte)0) < 0);
+        Assert.True(bytes.Slice(56).IndexOfAnyExcept((byte)0xA5) < 0);
+
+        Span<ulong> words = stackalloc ulong[129];
+        words.Fill(ulong.MaxValue);
+        SecureArray.Zero(words, SecureArray.DefaultCall);
+        Assert.True(words.IndexOfAnyExcept(0UL) < 0);
+
+        Span<int> ints = stackalloc int[3];
+        ints.Fill(-1);
+        SecureArray.Zero(ints.Slice(1, 1), new FakeCall(lockLimit: int.MaxValue));
+        Assert.Equal(-1, ints[0]);
+        Assert.Equal(0, ints[1]);
+        Assert.Equal(-1, ints[2]);
+
+        SecureArray.Zero(Span<long>.Empty);
     }
 
     /// <summary>

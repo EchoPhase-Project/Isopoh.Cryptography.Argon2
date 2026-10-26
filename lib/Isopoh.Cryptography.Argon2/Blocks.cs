@@ -94,9 +94,11 @@ public class Blocks
     }
 
     /// <summary>
-    /// Gets the single array under all the blocks, when there is one (any
-    /// memory under 2 GiB), so a hot loop can address blocks by offset
-    /// instead of going through a <see cref="BlockValues"/> per block.
+    /// Gets the single array under all the blocks, when there is one (up to
+    /// <see cref="Argon2Memory.CsharpMaxBlocksPerArray"/> blocks, about 16 GiB:
+    /// an array holds up to 0x7FEFFFFF ulong elements, not bytes), so a hot
+    /// loop can address blocks by offset instead of going through a
+    /// <see cref="BlockValues"/> per block.
     /// </summary>
     /// <param name="memory">The array, block i at qword i * <see cref="Argon2.QwordsInBlock"/>.</param>
     /// <returns>True if the blocks lie over one array.</returns>

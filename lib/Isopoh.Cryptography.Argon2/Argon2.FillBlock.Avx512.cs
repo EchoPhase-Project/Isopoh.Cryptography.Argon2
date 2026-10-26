@@ -24,9 +24,11 @@ using System.Runtime.Intrinsics.X86;
 /// </summary>
 /// <remarks>
 /// Each primitive falls back to portable Vector512 code when AVX-512F is
-/// missing; the JIT drops the branch not taken. Only the portable code can
-/// run without AVX-512 hardware, which is how the kernel is checked against
-/// the AVX2 one on machines without it.
+/// missing; the JIT drops the branch not taken. Hashing uses this kernel only
+/// on AVX-512 hardware, but the portable code runs anywhere: the unit test
+/// FillBlockKernelTests calls this kernel (and the AVX2 one) directly and
+/// checks it against a scalar RFC 9106 block fill on every machine, through
+/// the hardware path where AVX-512 is present.
 /// </remarks>
 public sealed partial class Argon2
 {

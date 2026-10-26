@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -245,7 +246,7 @@ public class SecureArray
         try
         {
             IntPtr bufPtr = bufHandle.AddrOfPinnedObject();
-            var cnt = new UIntPtr((uint)buffer.Length * (uint)BuiltInTypeElementSize(buffer));
+            nuint cnt = ByteLength(buffer.Length, BuiltInTypeElementSize(buffer));
             (call?.ZeroMemory ?? DefaultCall.ZeroMemory)(bufPtr, cnt);
         }
         finally
@@ -272,15 +273,17 @@ public class SecureArray
         // Pin the span's own memory. GCHandle.Alloc(buffer.GetPinnableReference())
         // boxed a copy of the first element: that copy was zeroed instead of the
         // span, and Length * size bytes were written from it into the heap.
-        int sizeInBytes = buffer.Length * BuiltInTypeElementSize(buffer);
+        // The byte count is computed in nuint: an int product wraps for spans of
+        // 2 GiB or more (MemoryMarshal.AsBytes throws for them too).
+        nuint sizeInBytes = ByteLength(buffer.Length, BuiltInTypeElementSize(buffer));
         if (sizeInBytes == 0)
         {
             return;
         }
 
-        fixed (byte* bufPtr = MemoryMarshal.AsBytes(buffer))
+        fixed (byte* bufPtr = &Unsafe.As<T, byte>(ref MemoryMarshal.GetReference(buffer)))
         {
-            (call?.ZeroMemory ?? DefaultCall.ZeroMemory)((IntPtr)bufPtr, new UIntPtr((uint)sizeInBytes));
+            (call?.ZeroMemory ?? DefaultCall.ZeroMemory)((IntPtr)bufPtr, sizeInBytes);
         }
     }
 
@@ -301,7 +304,7 @@ public class SecureArray
             throw new ArgumentNullException(nameof(buf));
         }
 
-        int sizeInBytes = BuiltInTypeElementSize(buf) * buf.Length;
+        nuint sizeInBytes = ByteLength(buf.Length, BuiltInTypeElementSize(buf));
         if (this.handle == default)
         {
             this.handle = GCHandle.Alloc(buf, GCHandleType.Pinned);
@@ -310,11 +313,12 @@ public class SecureArray
         try
         {
             IntPtr bufPtr = this.handle.AddrOfPinnedObject();
-            var cnt = new UIntPtr((uint)sizeInBytes);
-            this.Call.ZeroMemory(bufPtr, cnt);
+            this.Call.ZeroMemory(bufPtr, sizeInBytes);
             if (this.virtualLocked)
             {
-                this.Call.UnlockMemory(bufPtr, cnt);
+                // Unlock only once, so a second Dispose does not unlock again.
+                this.virtualLocked = false;
+                this.Call.UnlockMemory(bufPtr, sizeInBytes);
             }
         }
         finally
@@ -360,9 +364,9 @@ public class SecureArray
                         throw new LockFailException($"Memory locking is not supported by {this.Call.Os}.");
                     }
 
-                    int sizeInBytes = BuiltInTypeElementSize(buffer) * buffer.Length;
+                    nuint sizeInBytes = ByteLength(buffer.Length, BuiltInTypeElementSize(buffer));
                     IntPtr bufPtr = tmpHandle.AddrOfPinnedObject();
-                    var cnt = new UIntPtr((uint)sizeInBytes);
+                    nuint cnt = sizeInBytes;
                     this.Call.ZeroMemory(bufPtr, cnt);
                     string? err = this.Call.LockMemory(bufPtr, cnt);
                     if (err != null)
@@ -371,7 +375,7 @@ public class SecureArray
                         if (ReportMaxLockableOnLockFail)
                         {
                             int max = this.GetMaxLockable();
-                            msg = max > sizeInBytes ? $"Under current available value of {max} bytes (try again, it may work)" : $"Currently available: {max} bytes";
+                            msg = (nuint)max > sizeInBytes ? $"Under current available value of {max} bytes (try again, it may work)" : $"Currently available: {max} bytes";
                         }
                         else
                         {
@@ -399,6 +403,19 @@ public class SecureArray
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Gets the number of bytes in a buffer without int overflow.
+    /// </summary>
+    /// <param name="length">The number of elements.</param>
+    /// <param name="elementSize">The size of one element in bytes.</param>
+    /// <returns>
+    /// <paramref name="length"/> * <paramref name="elementSize"/>, computed in <see cref="nuint"/>.
+    /// </returns>
+    private static nuint ByteLength(int length, int elementSize)
+    {
+        return (nuint)(uint)length * (nuint)(uint)elementSize;
     }
 
     /// <summary>

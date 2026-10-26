@@ -106,46 +106,28 @@ public sealed class Argon2Memory
     public Argon2Memory(Argon2Config config, Argon2MemoryPolicy shrinkMemoryPolicy, LockMemoryPolicy? lockMemory)
     {
         this.secureArrayCall = config.SecureArrayCall;
-        this.FillMemoryBlocksWorkingBufferLength = config.WorkingBufferLength;
+        this.LockMemory = lockMemory;
+        this.Blocks = new Blocks(Array.Empty<Memory<ulong>>());
         if (lockMemory.HasValue)
         {
-            this.workingSecureArray = SecureArray<ulong>.Create(
-                this.FillMemoryBlocksWorkingBufferLength,
-                config.SecureArrayCall,
-                lockMemory.Value);
-            this.fillMemoryBlocksWorkingBuffer = new Memory<ulong>(this.workingSecureArray.Buffer);
             this.argon2SecureArray = SecureArray<byte>.Create(Argon2WorkingBufferSize, this.secureArrayCall, lockMemory.Value);
             this.Argon2WorkingBuffer = new Memory<byte>(this.argon2SecureArray.Buffer);
         }
         else
         {
-            this.fillMemoryBlocksWorkingBuffer = new Memory<ulong>(new ulong[this.FillMemoryBlocksWorkingBufferLength]);
             this.Argon2WorkingBuffer = new Memory<byte>(new byte[Argon2WorkingBufferSize]);
         }
 
-        this.ShrinkMemoryPolicy = shrinkMemoryPolicy;
-        this.LockMemory = lockMemory;
-        this.BlockCount = 0;
-        this.SegmentBlockCount = 0;
-        this.LaneBlockCount = 0;
-        this.Blocks = new Blocks(Array.Empty<Memory<ulong>>());
-        this.ClearPassword = config.ClearPassword;
-        this.ClearSecret = config.ClearSecret;
-        this.Lanes = config.Lanes;
-        this.MemoryCost = config.MemoryCost;
-        this.Threads = config.Threads;
-        this.TimeCost = config.TimeCost;
-        this.Type = config.Type;
-        this.Version = config.Version;
-        (this.configSecureArray, this.configWorkingBuffer,
-         this.configAssociatedData,
-         this.configHash,
-         this.configKeyIdentifier,
-         this.configPassword,
-         this.configSalt,
-         this.configSecret) =
-            CopyConfig(config, this.configSecureArray, this.configWorkingBuffer, this.secureArrayCall, this.LockMemory, this.shrinkMemoryPolicy);
-        this.ResetNonConfigBuffers(config);
+        try
+        {
+            this.Init(config, shrinkMemoryPolicy);
+        }
+        catch (Exception)
+        {
+            // The caller gets no instance to dispose: unlock what was locked.
+            this.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
@@ -498,6 +480,9 @@ public sealed class Argon2Memory
     public void Dispose()
     {
         this.Clear();
+
+        // Clear zeroed it; this also unpins and unlocks it.
+        this.argon2SecureArray?.Dispose();
     }
 
     /// <summary>
@@ -548,7 +533,10 @@ public sealed class Argon2Memory
 
             if (configSecureArray == null || configSecureArray.Buffer.Length < requiredLength || (configSecureArray.Buffer.Length > requiredLength && memoryPolicy == Argon2MemoryPolicy.Shrink))
             {
-                configSecureArray = SecureArray<byte>.Create(requiredLength, secureArrayCall, lockMemory.Value);
+                // The old array holds the password, secret, and salt: zero, unpin, and unlock it.
+                SecureArray<byte> newConfigSecureArray = SecureArray<byte>.Create(requiredLength, secureArrayCall, lockMemory.Value);
+                configSecureArray?.Dispose();
+                configSecureArray = newConfigSecureArray;
             }
 
             configWorkingBuffer = new Memory<byte>(configSecureArray.Buffer);
@@ -563,7 +551,10 @@ public sealed class Argon2Memory
 
             if (configWorkingBuffer.Length < requiredLength || (configWorkingBuffer.Length > requiredLength && memoryPolicy == Argon2MemoryPolicy.Shrink))
             {
-                configWorkingBuffer = new Memory<byte>(new byte[requiredLength]);
+                // The old buffer holds the password, secret, and salt: zero it before it is dropped.
+                var newConfigWorkingBuffer = new Memory<byte>(new byte[requiredLength]);
+                SecureArray.Zero(configWorkingBuffer.Span, secureArrayCall);
+                configWorkingBuffer = newConfigWorkingBuffer;
             }
         }
 
@@ -597,6 +588,34 @@ public sealed class Argon2Memory
 
             return (currentOffset, 0, 0);
         }
+    }
+
+    /// <summary>
+    /// The part of the constructor that allocates the configuration, working, and block buffers.
+    /// </summary>
+    private void Init(Argon2Config config, Argon2MemoryPolicy shrinkMemoryPolicy)
+    {
+        this.ShrinkMemoryPolicy = shrinkMemoryPolicy;
+        this.BlockCount = 0;
+        this.SegmentBlockCount = 0;
+        this.LaneBlockCount = 0;
+        this.ClearPassword = config.ClearPassword;
+        this.ClearSecret = config.ClearSecret;
+        this.Lanes = config.Lanes;
+        this.MemoryCost = config.MemoryCost;
+        this.Threads = config.Threads;
+        this.TimeCost = config.TimeCost;
+        this.Type = config.Type;
+        this.Version = config.Version;
+        (this.configSecureArray, this.configWorkingBuffer,
+         this.configAssociatedData,
+         this.configHash,
+         this.configKeyIdentifier,
+         this.configPassword,
+         this.configSalt,
+         this.configSecret) =
+            CopyConfig(config, this.configSecureArray, this.configWorkingBuffer, this.secureArrayCall, this.LockMemory, this.shrinkMemoryPolicy);
+        this.ResetNonConfigBuffers(config);
     }
 
     private void ResetNonConfigBuffers(Argon2Config config)
@@ -635,7 +654,20 @@ public sealed class Argon2Memory
         {
             if ((this.ShrinkMemoryPolicy == Argon2MemoryPolicy.Shrink && this.FillMemoryBlocksWorkingBufferLength > config.WorkingBufferLength) || this.fillMemoryBlocksWorkingBuffer.Length < config.WorkingBufferLength)
             {
-                this.workingSecureArray = SecureArray<ulong>.Create(config.WorkingBufferLength, this.secureArrayCall, lockMemory);
+                SecureArray<ulong> newWorkingSecureArray;
+                try
+                {
+                    newWorkingSecureArray = SecureArray<ulong>.Create(config.WorkingBufferLength, this.secureArrayCall, lockMemory);
+                }
+                catch (Exception)
+                {
+                    // The configuration already changed: do not leave buffers that do not agree with it.
+                    this.Clear();
+                    throw;
+                }
+
+                this.workingSecureArray?.Dispose();
+                this.workingSecureArray = newWorkingSecureArray;
                 this.fillMemoryBlocksWorkingBuffer = new Memory<ulong>(this.workingSecureArray.Buffer);
             }
 
@@ -663,6 +695,9 @@ public sealed class Argon2Memory
             }
         }
 
+        // Holds the last array while it is out of blockSecureArrays, so it is
+        // disposed if an allocation fails.
+        SecureArray<ulong>? detachedSecureArray = null;
         try
         {
             var fullMemoriesCount = requiredMemoryBlockCount / CsharpMaxBlocksPerArray;
@@ -684,6 +719,7 @@ public sealed class Argon2Memory
             }
 
             var lastSecureArray = this.blockSecureArrays[this.blockSecureArrays.Count - 1];
+            detachedSecureArray = lastSecureArray;
             this.blockSecureArrays.RemoveAt(this.blockSecureArrays.Count - 1);
             this.blockMemories.RemoveAt(this.blockMemories.Count - 1);
 
@@ -701,12 +737,14 @@ public sealed class Argon2Memory
             if (lastMemoryBlockCount > lastCapacity || (shrink && lastMemoryBlockCount < lastCapacity))
             {
                 lastSecureArray.Dispose();
+                detachedSecureArray = null;
                 lastSecureArray = SecureArray<ulong>.Create(
                     lastMemoryBlockCount * Argon2.QwordsInBlock,
                     this.secureArrayCall,
                     lockMemory);
             }
 
+            detachedSecureArray = null;
             this.blockSecureArrays.Add(lastSecureArray);
             this.blockMemories.Add(lastSecureArray.Buffer);
             this.Blocks = this.Blocks.IsOver(this.blockMemories) ? this.Blocks : new Blocks(this.blockMemories);
@@ -717,6 +755,7 @@ public sealed class Argon2Memory
             int memoryCount = this.blockMemories.Count;
 
             // be nice, clear allocated memory that will never be used sooner rather than later
+            detachedSecureArray?.Dispose();
             this.Clear();
 #pragma warning disable S112
             throw new OutOfMemoryException(
@@ -731,6 +770,7 @@ public sealed class Argon2Memory
             this.Blocks = new Blocks(Array.Empty<Memory<ulong>>());
 
             // be nice, clear allocated memory that will never be used sooner rather than later
+            detachedSecureArray?.Dispose();
             this.Clear();
             throw;
         }
@@ -742,7 +782,20 @@ public sealed class Argon2Memory
         {
             if ((this.ShrinkMemoryPolicy == Argon2MemoryPolicy.Shrink && this.FillMemoryBlocksWorkingBufferLength > resetConfig.WorkingBufferLength) || this.fillMemoryBlocksWorkingBuffer.Length < resetConfig.WorkingBufferLength)
             {
-                this.fillMemoryBlocksWorkingBuffer = new Memory<ulong>(new ulong[resetConfig.WorkingBufferLength]);
+                Memory<ulong> newFillMemoryBlocksWorkingBuffer;
+                try
+                {
+                    newFillMemoryBlocksWorkingBuffer = new Memory<ulong>(new ulong[resetConfig.WorkingBufferLength]);
+                }
+                catch (Exception)
+                {
+                    // The configuration already changed: do not leave buffers that do not agree with it.
+                    this.Clear();
+                    throw;
+                }
+
+                SecureArray.Zero(this.fillMemoryBlocksWorkingBuffer.Span, this.secureArrayCall);
+                this.fillMemoryBlocksWorkingBuffer = newFillMemoryBlocksWorkingBuffer;
             }
 
             this.FillMemoryBlocksWorkingBufferLength = resetConfig.WorkingBufferLength;
@@ -769,6 +822,7 @@ public sealed class Argon2Memory
                 }
 
                 remainingMemoryBlockCount -= lastMemoryBlockCount;
+                SecureArray.Zero(this.blockMemories[this.blockMemories.Count - 1].Span, this.secureArrayCall);
                 this.blockMemories.RemoveAt(this.blockMemories.Count - 1);
             }
         }
@@ -799,7 +853,9 @@ public sealed class Argon2Memory
             int lastCapacity = lastMemory.Length / Argon2.QwordsInBlock;
             if (lastMemoryBlockCount > lastCapacity || (shrink && lastMemoryBlockCount < lastCapacity))
             {
-                lastMemory = new ulong[lastMemoryBlockCount * Argon2.QwordsInBlock];
+                var newLastMemory = new Memory<ulong>(new ulong[lastMemoryBlockCount * Argon2.QwordsInBlock]);
+                SecureArray.Zero(lastMemory.Span, this.secureArrayCall);
+                lastMemory = newLastMemory;
             }
 
             this.blockMemories.Add(lastMemory);
@@ -830,14 +886,41 @@ public sealed class Argon2Memory
         }
     }
 
+    /// <summary>
+    /// Zero and release the configuration, working, and block buffers. The
+    /// next reset allocates them again. The <see cref="Argon2WorkingBuffer"/>
+    /// stays allocated (and locked), but is zeroed.
+    /// </summary>
     private void Clear()
     {
+        if (this.LockMemory == null)
+        {
+            // Plain arrays: nothing else zeroes them before the GC frees them.
+            this.blockMemories.ForEach(m => SecureArray.Zero(m.Span, this.secureArrayCall));
+            SecureArray.Zero(this.fillMemoryBlocksWorkingBuffer.Span, this.secureArrayCall);
+            SecureArray.Zero(this.configWorkingBuffer.Span, this.secureArrayCall);
+        }
+
+        SecureArray.Zero(this.Argon2WorkingBuffer.Span, this.secureArrayCall);
         this.blockSecureArrays.ForEach(m => m.Dispose());
-        this.workingSecureArray?.Dispose();
-        this.argon2SecureArray?.Dispose();
         this.blockSecureArrays.Clear();
         this.blockMemories.Clear();
+        this.Blocks = new Blocks(Array.Empty<Memory<ulong>>());
+
+        // Drop the references to the released arrays. A disposed SecureArray is
+        // no longer pinned or locked: a later reset must not use it again.
+        this.workingSecureArray?.Dispose();
+        this.workingSecureArray = null;
+        this.fillMemoryBlocksWorkingBuffer = Memory<ulong>.Empty;
         this.configSecureArray?.Dispose();
+        this.configSecureArray = null;
+        this.configWorkingBuffer = Memory<byte>.Empty;
+        this.configAssociatedData = default;
+        this.configKeyIdentifier = default;
+        this.configHash = default;
+        this.configPassword = default;
+        this.configSalt = default;
+        this.configSecret = default;
         this.FillMemoryBlocksWorkingBufferLength = 0;
         this.BlockCount = 0;
         this.SegmentBlockCount = 0;

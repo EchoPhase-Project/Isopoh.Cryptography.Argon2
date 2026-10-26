@@ -17,112 +17,51 @@ using Xunit.Abstractions;
 public static class LeakInHash
 {
     /// <summary>
-    /// Look for leaks.
+    /// Look for leaks of managed memory, of objects, and of memory locks in hashing.
     /// </summary>
     /// <param name="output">Used to write output.</param>
     /// <returns>String with pass/fail message.</returns>
     public static (bool Passed, string Message) Test(ITestOutputHelper output)
     {
-        var locks = new Dictionary<IntPtr, (UIntPtr, int)>(); // address to (size, index)
-        var lockCount = 0;
-        var failedLocks = new List<(IntPtr, UIntPtr)>(); // (address, size)
-        var badLocks = new List<int>();
-        var badUnlockCount = 0;
-        var secureArrayCall = new SecureArrayCall(
-            SecureArray.DefaultCall.ZeroMemory,
-            (m, l) =>
-            {
-                string? ret = SecureArray.DefaultCall.LockMemory(m, l);
-                if (ret == null)
-                {
-                    lock (locks)
-                    {
-                        ++lockCount;
-                        if (!locks.TryAdd(m, (l, lockCount)))
-                        {
-                            badLocks.Add(lockCount);
-                        }
-                    }
-                }
-                else
-                {
-                    lock (locks)
-                    {
-                        failedLocks.Add((m, l));
-                    }
-                }
-
-                return ret;
-            },
-            (m, l) =>
-            {
-                lock (locks)
-                {
-                    if (locks.ContainsKey(m))
-                    {
-                        locks.Remove(m);
-                        SecureArray.DefaultCall.UnlockMemory(m, l);
-                    }
-                    else
-                    {
-                        ++badUnlockCount;
-                    }
-                }
-            },
-            $"Wrapped {SecureArray.DefaultCall.Os}");
-
-        const string password = "b";
-        const int maxIteration = 10;
-        var memoryDiff = new long[maxIteration];
+        var tracker = new LockTracker();
         var config = new Argon2Config
         {
-            Password = Encoding.UTF8.GetBytes(password),
-            SecureArrayCall = secureArrayCall,
+            Password = Encoding.UTF8.GetBytes("b"),
+            Salt = Encoding.UTF8.GetBytes("somesaltsomesalt"),
+            MemoryCost = 1024,
+            TimeCost = 2,
+            Lanes = 2,
+            Threads = 2,
+            SecureArrayCall = tracker.Call,
         };
-        for (var i = 0; i < maxIteration; i++)
+
+        (long perIteration, long[] windowGrowth, string? leak) = MemoryGrowth.Measure(() => Argon2.Hash(config));
+        output.WriteLine($"TestHashLeaks: {perIteration} bytes per iteration (median); window growth [{string.Join(", ", windowGrowth)}].");
+
+        string? notCollected = MemoryGrowth.NotCollected(() =>
         {
-            output.WriteLine($"TestHashLeaks: Iteration {i + 1} of {maxIteration}");
-            Thread.Sleep(100);
-            long prevTotalMemory = GC.GetTotalMemory(true);
-            {
-                Argon2.Hash(config);
-            }
-
-            Thread.Sleep(100);
-            long postTotalMemory = GC.GetTotalMemory(true);
-            memoryDiff[i] = postTotalMemory - prevTotalMemory;
-        }
-
-        string? failedLocksMessage = null;
-        if (failedLocks.Count > 0)
-        {
-            string s = failedLocks.Count > 1 ? "s" : string.Empty;
-
-            // only printed if any other failures.
-            failedLocksMessage = $"{failedLocks.Count} / {lockCount} failed lock{s}, size{s}=[{string.Join(", ", failedLocks.Select(x => $"0x{x.Item1.ToInt64():x8}:{x.Item2.ToUInt64()}"))}].";
-        }
+            var argon2 = new Argon2(config);
+            argon2.Hash();
+            argon2.Dispose();
+            var memory = new Argon2Memory(config, Argon2MemoryPolicy.NoShrink, LockMemoryPolicy.BestEffort);
+            Argon2.Hash(memory);
+            memory.Dispose();
+            return new[] { ("Argon2", new WeakReference(argon2)), ("Argon2Memory", new WeakReference(memory)) };
+        });
 
         var errs = new List<string>();
-        if (MemoryGrowth.Leak(memoryDiff) is { } leak)
+        if (leak != null)
         {
             errs.Add(leak);
         }
 
-        if (badLocks.Any())
+        if (notCollected != null)
         {
-            errs.Add($"{badLocks.Count} / {lockCount} bad locks: [{string.Join(", ", badLocks.Select(l => $"{l}"))}].");
+            errs.Add(notCollected);
         }
 
-        if (badUnlockCount > 0)
-        {
-            errs.Add($"{badUnlockCount} bad unlocks.");
-        }
-
-        if (locks.Any())
-        {
-            errs.Add($"Leaked {locks.Count} / {lockCount} locks: address:size:index=[{string.Join(", ", locks.Select(kv => $"0x{kv.Key.ToInt64():x8}:{kv.Value.Item1.ToUInt64()}:{kv.Value.Item2}"))}].");
-        }
-
-        return (!errs.Any(), errs.Any() ? $"Hash leaks: FAILED: {string.Join(" ", errs)}{(failedLocksMessage == null ? string.Empty : $" {failedLocksMessage}")}" : "Leaks: Passed");
+        errs.AddRange(tracker.Errors());
+        string? failedLocks = tracker.FailedLocks();
+        return (!errs.Any(), errs.Any() ? $"Hash leaks: FAILED: {string.Join(" ", errs)}{(failedLocks == null ? string.Empty : $" {failedLocks}")}" : "Hash leaks: Passed");
     }
 }

@@ -47,10 +47,13 @@ public static class MemoryNoAlloc
         var config = new Argon2Config
         {
             Password = Encoding.UTF8.GetBytes(password),
+            MemoryCost = 4096,
+            Lanes = 2,
+            Threads = 2,
             SecureArrayCall = secureArrayCall,
         };
         const int maxIteration = 10;
-        var memory = new Argon2Memory(config, Argon2MemoryPolicy.NoShrink, LockMemoryPolicy.BestEffort);
+        using var memory = new Argon2Memory(config, Argon2MemoryPolicy.NoShrink, LockMemoryPolicy.BestEffort);
         var hash = Argon2.Hash(memory);
         Argon2.Verify(hash, config);
         int firstLockCount = lockCount;
