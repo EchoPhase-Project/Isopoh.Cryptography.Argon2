@@ -10,6 +10,8 @@
     <Nullable>warnings</Nullable>
 
     <GenerateDocumentationFile>True</GenerateDocumentationFile>
+
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>

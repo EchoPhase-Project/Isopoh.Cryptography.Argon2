@@ -441,6 +441,187 @@ public class Argon2ApiTests
         Assert.Throws<ArgumentException>(() => encoded.Argon2RequiredBufferLengths());
     }
 
+    /// <summary>
+    /// Without locked memory, a replaced configuration buffer is zeroed: it held the password.
+    /// </summary>
+    [Fact]
+    public void ReplacedConfigBufferIsZeroed()
+    {
+        var config = Config(Argon2Type.HybridAddressing, Argon2Version.Nineteen);
+        using var memory = new Argon2Memory(config, Argon2MemoryPolicy.NoShrink, null);
+        Span<byte> oldPassword = memory.Password;
+        Assert.Equal("password", Encoding.UTF8.GetString(oldPassword));
+
+        config.Password = Encoding.UTF8.GetBytes("a much longer password than before");
+        memory.Reset(config);
+        Assert.Equal("a much longer password than before", Encoding.UTF8.GetString(memory.Password));
+        Assert.Equal(new byte[oldPassword.Length], oldPassword.ToArray());
+    }
+
+    /// <summary>
+    /// Each locked array that <see cref="Argon2Memory"/> replaces on reset, or
+    /// frees on dispose, is unlocked exactly once.
+    /// </summary>
+    [Fact]
+    public void ReplacedSecureArraysAreDisposed()
+    {
+        var locked = new System.Collections.Generic.Dictionary<IntPtr, nuint>();
+        int lockCount = 0;
+        int badUnlockCount = 0;
+        var call = new SecureArrayCall(
+            SecureArray.DefaultCall.ZeroMemory,
+            (m, l) =>
+            {
+                ++lockCount;
+                locked.Add(m, l);
+                return null;
+            },
+            (m, l) =>
+            {
+                if (!locked.Remove(m))
+                {
+                    ++badUnlockCount;
+                }
+            },
+            "Counting");
+
+        var config = Config(Argon2Type.HybridAddressing, Argon2Version.Nineteen);
+        config.SecureArrayCall = call;
+        using (var memory = new Argon2Memory(config, Argon2MemoryPolicy.Shrink, LockMemoryPolicy.Enforce))
+        {
+            int initialLocks = locked.Count;
+
+            // The password grows: a bigger configuration array.
+            config.Password = Encoding.UTF8.GetBytes("a much longer password than before");
+            memory.Reset(config);
+
+            // The password shrinks under Shrink: a smaller configuration array.
+            config.Password = Encoding.UTF8.GetBytes("pw");
+            memory.Reset(config);
+
+            // The lanes change: a different working buffer and block arrays.
+            config.Lanes = 4;
+            config.Threads = 4;
+            memory.Reset(config);
+            config.Lanes = 1;
+            config.Threads = 1;
+            memory.Reset(config);
+            Assert.True(Argon2.Hash(memory).Length > 0);
+
+            Assert.True(lockCount > initialLocks, "the resets allocated no new arrays");
+            Assert.Equal(initialLocks, locked.Count);
+        }
+
+        Assert.Empty(locked);
+        Assert.Equal(0, badUnlockCount);
+    }
+
+    /// <summary>
+    /// After a reset that fails, the next reset allocates new locked arrays.
+    /// It does not use the arrays that the failure released, which are no
+    /// longer locked. The hash is correct, and each lock gets one unlock.
+    /// </summary>
+    [Fact]
+    public void ResetAfterFailedResetUsesLockedArrays()
+    {
+        var locked = new System.Collections.Generic.Dictionary<IntPtr, nuint>();
+        int lockCount = 0;
+        int unlockCount = 0;
+        nuint refuseFrom = nuint.MaxValue;
+        var call = new SecureArrayCall(
+            SecureArray.DefaultCall.ZeroMemory,
+            (m, l) =>
+            {
+                if (l >= refuseFrom)
+                {
+                    return "refused by the test";
+                }
+
+                ++lockCount;
+                locked.Add(m, l);
+                return null;
+            },
+            (m, l) =>
+            {
+                ++unlockCount;
+                Assert.True(locked.Remove(m), "unlocked memory that was not locked");
+            },
+            "Refusing");
+
+        var config = Config(Argon2Type.HybridAddressing, Argon2Version.Nineteen);
+        config.Secret = Encoding.UTF8.GetBytes("secret");
+        string expected;
+        using (var plain = new Argon2Memory(config, Argon2MemoryPolicy.NoShrink, null))
+        {
+            expected = Argon2.Hash(plain);
+        }
+
+        config.SecureArrayCall = call;
+        using (var memory = new Argon2Memory(config, Argon2MemoryPolicy.NoShrink, LockMemoryPolicy.Enforce))
+        {
+            Assert.Equal(expected, Argon2.Hash(memory));
+
+            // The working buffer grows; then the 1 MiB block array is refused.
+            var big = Config(Argon2Type.HybridAddressing, Argon2Version.Nineteen);
+            big.MemoryCost = 1024;
+            big.SecureArrayCall = call;
+            refuseFrom = 1024 * 1024;
+            Assert.Throws<LockFailException>(() => memory.Reset(big));
+            refuseFrom = nuint.MaxValue;
+
+            memory.Reset(config);
+            Assert.True(IsLocked(locked, memory.FillMemoryBlocksWorkingBuffer.Span), "working buffer is not locked");
+            Assert.True(IsLocked(locked, memory.Argon2WorkingBuffer.Span), "Argon2 working buffer is not locked");
+            Assert.True(IsLocked(locked, memory.Password), "configuration buffer is not locked");
+            Assert.Equal(expected, Argon2.Hash(memory));
+        }
+
+        Assert.Empty(locked);
+        Assert.Equal(lockCount, unlockCount);
+    }
+
+    /// <summary>
+    /// Without locked memory, dispose zeroes the buffers: the configuration
+    /// buffer holds the password, the secret, and the salt.
+    /// </summary>
+    [Fact]
+    public void DisposeZeroesUnlockedBuffers()
+    {
+        var config = Config(Argon2Type.HybridAddressing, Argon2Version.Nineteen);
+        config.Secret = Encoding.UTF8.GetBytes("secret");
+        var memory = new Argon2Memory(config, Argon2MemoryPolicy.NoShrink, null);
+        Assert.True(Argon2.Hash(memory).Length > 0);
+        Span<byte> password = memory.Password;
+        Span<byte> salt = memory.Salt;
+        Span<byte> secret = memory.Secret;
+        Span<byte> hash = memory.Hash;
+        Memory<ulong> working = memory.FillMemoryBlocksWorkingBuffer;
+        Memory<byte> argon2Working = memory.Argon2WorkingBuffer;
+        BlockValues lastBlock = memory.Blocks[memory.BlockCount - 1];
+        Assert.Equal("secret", Encoding.UTF8.GetString(secret));
+
+        memory.Dispose();
+        Assert.Equal(new byte[password.Length], password.ToArray());
+        Assert.Equal(new byte[salt.Length], salt.ToArray());
+        Assert.Equal(new byte[secret.Length], secret.ToArray());
+        Assert.Equal(new byte[hash.Length], hash.ToArray());
+        Assert.Equal(new ulong[working.Length], working.ToArray());
+        Assert.Equal(new byte[argon2Working.Length], argon2Working.ToArray());
+        Assert.All(Enumerable.Range(0, Argon2.QwordsInBlock), i => Assert.Equal(0UL, lastBlock[i]));
+        memory.Dispose(); // a second dispose does nothing
+    }
+
+    private static unsafe bool IsLocked<T>(System.Collections.Generic.Dictionary<IntPtr, nuint> locked, Span<T> span)
+        where T : unmanaged
+    {
+        fixed (T* p = span)
+        {
+            ulong start = (ulong)p;
+            ulong end = start + ((ulong)span.Length * (ulong)sizeof(T));
+            return locked.Any(l => (ulong)l.Key <= start && end <= (ulong)l.Key + l.Value);
+        }
+    }
+
     private static Argon2Config Config(Argon2Type type, Argon2Version version) => new()
     {
         Type = type,
