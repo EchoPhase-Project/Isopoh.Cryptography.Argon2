@@ -2,18 +2,26 @@ name: CI - Build and Test (Release)
 
 on:
   push:
-    branches: [ main ]
+    # echophase-ci is the working CI branch of the EchoPhase fork.
+    branches: [ main, echophase-ci ]
   pull_request:
   workflow_dispatch:
     inputs:
       run_full_tests:
-        description: Run the long-running managed test suite (Slow and HighMemory tests included)
+        description: Run the whole managed test suite (Slow included, HighMemory excluded)
+        required: false
+        type: boolean
+        default: false
+      run_high_memory_test:
+        description: Run only the HighMemory test (needs a runner with more than 32 GiB of RAM, see the HIGH_MEMORY_RUNNER variable)
         required: false
         type: boolean
         default: false
 
 # A new push to a pull request cancels the run for the previous push.
-# Runs on main are never cancelled.
+# Pushes (main, echophase-ci) and manual runs are never cancelled: each
+# pushed commit that starts keeps its own result. A newer push to the same
+# branch waits for the running one; GitHub keeps only the newest waiting run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -196,10 +204,12 @@ jobs:
           DOTNET_EnableHWIntrinsic: 0
         run: dotnet test test/Isopoh.Cryptography.Test/Isopoh.Cryptography.Test.csproj -c Release --no-build --filter "${{ env.FAST_TEST_FILTER }}"
 
-  # The whole suite, with the Slow and HighMemory tests. The release-test
-  # preset runs "dotnet test" on all projects without a filter. The
-  # HighMemory test needs more than 2 GiB; ubuntu-latest (public
-  # repositories) has 16 GiB, which is enough.
+  # The whole managed suite, with the Slow tests (TestParallelismTiming)
+  # but without the HighMemory test (see high-memory-test). The test
+  # project is the only test project of the repository. The release-test
+  # CMake preset runs "dotnet test" without a filter, so this job calls
+  # "dotnet test" directly, after the native reference build, as
+  # build-and-test does.
   full-managed-tests:
     if: github.event_name == 'workflow_dispatch' && inputs.run_full_tests
     runs-on: ubuntu-latest
@@ -225,8 +235,67 @@ jobs:
           free -h
           echo "AVX-512: $(grep -o -m1 'avx512f' /proc/cpuinfo || echo none)"
 
-      - name: Configure release build
+      - name: "Configure CMake (CMake build preset: release)"
         run: cmake --preset release
 
-      - name: Run full managed test suite
-        run: cmake --build --preset release-test
+      - name: Build native reference implementation
+        run: cmake --build --preset release-build --target argon2
+
+      - name: Locate native reference binary
+        run: |
+          exe="Reference/bin/Release/argon2"
+          test -f "$exe" || { echo "::error::$exe was not built"; exit 1; }
+          echo "REFERENCE_RUN_PATH=$GITHUB_WORKSPACE/$exe" >> "$GITHUB_ENV"
+
+      - name: Run full managed test suite (HighMemory excluded)
+        run: dotnet test test/Isopoh.Cryptography.Test/Isopoh.Cryptography.Test.csproj -c Release --filter "Category!=HighMemory" -p:GeneratePackageOnBuild=false
+
+  # Only TestHighMemoryCost (Category=HighMemory). It hashes with
+  # memoryCost = Argon2Memory.CsharpMaxBlocksPerArray + 271 = 16,769,295
+  # blocks of 1 KiB (16,769,280 after rounding to 4 * 20 lanes), so one
+  # hash needs about 16 GiB of working memory. It then verifies, which
+  # allocates another 16 GiB. The first hash's managed blocks stay on the
+  # heap until a GC, so the peak can be about 32 GiB. Use a runner with
+  # more than 32 GiB of RAM (40 GiB or more recommended). The GitHub-hosted
+  # ubuntu-latest runner has 16 GiB and will fail or swap: set the
+  # repository variable HIGH_MEMORY_RUNNER to the label of a larger-runner
+  # or self-hosted runner before you start this job.
+  high-memory-test:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_high_memory_test
+    runs-on: ${{ vars.HIGH_MEMORY_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            9.0.x
+            10.0.x
+
+      - name: Show runner memory and CPU
+        run: |
+          free -h
+          echo "AVX-512: $(grep -o -m1 'avx512f' /proc/cpuinfo || echo none)"
+
+      - name: "Configure CMake (CMake build preset: release)"
+        run: cmake --preset release
+
+      - name: Build native reference implementation
+        run: cmake --build --preset release-build --target argon2
+
+      - name: Locate native reference binary
+        run: |
+          exe="Reference/bin/Release/argon2"
+          test -f "$exe" || { echo "::error::$exe was not built"; exit 1; }
+          echo "REFERENCE_RUN_PATH=$GITHUB_WORKSPACE/$exe" >> "$GITHUB_ENV"
+
+      - name: Run HighMemory test
+        run: dotnet test test/Isopoh.Cryptography.Test/Isopoh.Cryptography.Test.csproj -c Release --filter "Category=HighMemory" -p:GeneratePackageOnBuild=false
