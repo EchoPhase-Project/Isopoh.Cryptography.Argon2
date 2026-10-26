@@ -9,7 +9,8 @@ namespace Isopoh.Cryptography.Argon2;
 using System;
 using System.Linq;
 using System.Runtime.CompilerServices;
-using System.Threading;
+using System.Runtime.ExceptionServices;
+using System.Threading.Tasks;
 using Isopoh.Cryptography.Blake2b;
 using Isopoh.Cryptography.SecureArray;
 
@@ -162,59 +163,43 @@ public sealed partial class Argon2
 
         if (parallelCount > 1)
         {
-            // ReSharper disable once SuggestVarOrType_Elsewhere
-            WaitHandle[] waitHandles =
-                Enumerable.Range(0, parallelCount)
-                    .Select(_ => new AutoResetEvent(false))
-                    .Cast<WaitHandle>()
-                    .ToArray();
+            // Worker w owns working buffer w and fills lanes w, w + parallelCount,
+            // and so on. Parallel.For returns only after every worker is done,
+            // even when one throws, so a slice is complete before the next one
+            // starts and no worker outlives the hash. The calling thread runs
+            // workers too, so the hash progresses even when the thread pool is
+            // busy, and there are no wait handles to dispose.
             Memory<ulong>[] workingBuffers = Enumerable.Range(0, parallelCount)
                 .Select(i => buf.Slice(i * threadWorkingBufferSize, threadWorkingBufferSize))
                 .ToArray();
+            var options = new ParallelOptions { MaxDegreeOfParallelism = parallelCount };
+            int lanes = this.memory.Lanes;
 
             for (var passNumber = 0; passNumber < this.memory.TimeCost; ++passNumber)
             {
                 for (var sliceNumber = 0; sliceNumber < SyncPointCount; ++sliceNumber)
                 {
-                    var laneNumber = 0;
-                    int remaining = this.memory.Lanes;
-                    for (; laneNumber < waitHandles.Length && laneNumber < this.memory.Lanes; ++laneNumber)
+                    int pass = passNumber;
+                    int slice = sliceNumber;
+                    try
                     {
-                        ThreadPool.QueueUserWorkItem(
-                            fs =>
+                        Parallel.For(
+                            0,
+                            parallelCount,
+                            options,
+                            worker =>
                             {
-#pragma warning disable CS8600 // Converting null literal or possible null value to non-nullable type.
-#pragma warning disable CS8602 // Dereference of a possibly null reference.
-                                this.FillSegment(((FillState)fs).Position, ((FillState)fs).Buf.Span);
-                                ((FillState)fs).Are.Set();
-#pragma warning restore CS8602 // Dereference of a possibly null reference.
-#pragma warning restore CS8600 // Converting null literal or possible null value to non-nullable type.
-                            },
-                            new FillState(new Position { Pass = passNumber, Lane = laneNumber, Slice = sliceNumber, Index = 0 }, workingBuffers[laneNumber], (AutoResetEvent)waitHandles[laneNumber]));
+                                Span<ulong> workingBuffer = workingBuffers[worker].Span;
+                                for (int lane = worker; lane < lanes; lane += parallelCount)
+                                {
+                                    this.FillSegment(new Position { Pass = pass, Lane = lane, Slice = slice, Index = 0 }, workingBuffer);
+                                }
+                            });
                     }
-
-                    while (laneNumber < this.memory.Lanes)
+                    catch (AggregateException e) when (e.InnerExceptions.Count == 1)
                     {
-                        int i = WaitHandle.WaitAny(waitHandles);
-                        --remaining;
-                        ThreadPool.QueueUserWorkItem(
-                            fs =>
-                            {
-#pragma warning disable CS8600 // Converting null literal or possible null value to non-nullable type.
-#pragma warning disable CS8602 // Dereference of a possibly null reference.
-                                this.FillSegment(((FillState)fs).Position, ((FillState)fs).Buf.Span);
-                                ((FillState)fs).Are.Set();
-#pragma warning restore CS8602 // Dereference of a possibly null reference.
-#pragma warning restore CS8600 // Converting null literal or possible null value to non-nullable type.
-                            },
-                            new FillState(new Position { Pass = passNumber, Lane = laneNumber, Slice = sliceNumber, Index = 0 }, workingBuffers[i], (AutoResetEvent)waitHandles[i]));
-                        ++laneNumber;
-                    }
-
-                    while (remaining > 0)
-                    {
-                        _ = WaitHandle.WaitAny(waitHandles);
-                        --remaining;
+                        ExceptionDispatchInfo.Capture(e.InnerExceptions[0]).Throw();
+                        throw;
                     }
                 }
 
@@ -524,14 +509,5 @@ public sealed partial class Argon2
         public int Slice { get; init; }
 
         public int Index { get; set; }
-    }
-
-    private sealed class FillState(Position position, Memory<ulong> buf, AutoResetEvent are)
-    {
-        public Position Position { get; } = position;
-
-        public Memory<ulong> Buf { get; } = buf;
-
-        public AutoResetEvent Are { get; } = are;
     }
 }
