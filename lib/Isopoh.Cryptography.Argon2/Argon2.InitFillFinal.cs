@@ -246,6 +246,25 @@ public sealed partial class Argon2
         }
     }
 
+    /// <summary>
+    /// Zero the scratch that holds values derived from the password: the
+    /// Argon2 working buffer (the seed, the first blocks, and the final block)
+    /// and the fill blocks at the start of each thread's working buffer. The
+    /// address values after them come only from public parameters and stay.
+    /// A few KiB for each thread: cheap next to the hash.
+    /// </summary>
+    private void ZeroScratch()
+    {
+        SecureArray.Zero(this.memory.Argon2WorkingBuffer.Span);
+        Span<ulong> buf = this.memory.FillMemoryBlocksWorkingBuffer.Span;
+        int scratchLength = (this.memory.Type == Argon2Type.DataDependentAddressing ? 2 : 6) * QwordsInBlock;
+        int threadWorkingBufferSize = scratchLength + this.SegmentBlockCount;
+        for (int start = 0; start < buf.Length; start += threadWorkingBufferSize)
+        {
+            SecureArray.Zero(buf.Slice(start, Math.Min(scratchLength, buf.Length - start)));
+        }
+    }
+
     private void Final(Span<byte> destination, Memory<byte> workingBuffer)
     {
         if (workingBuffer.Length < (2 * BlockSize) + (2 * Blake2B.OutputLength) + Blake2B.NoKeyBufferMinimumTotalSize)

@@ -97,6 +97,7 @@ public sealed partial class Argon2 : IDisposable
         }
         finally
         {
+            this.ZeroScratch();
             this.memory.EndUse();
         }
     }

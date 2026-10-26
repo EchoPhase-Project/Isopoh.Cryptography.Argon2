@@ -611,6 +611,34 @@ public class Argon2ApiTests
         memory.Dispose(); // a second dispose does nothing
     }
 
+    /// <summary>
+    /// A hash zeroes its scratch blocks when it ends: they hold values derived
+    /// from the password. The address values of data-independent addressing
+    /// come only from public parameters, and they can stay.
+    /// </summary>
+    /// <param name="type">The Argon2 type.</param>
+    /// <param name="threads">The thread count; each thread has its own scratch.</param>
+    [Theory]
+    [InlineData(Argon2Type.DataDependentAddressing, 1)]
+    [InlineData(Argon2Type.DataDependentAddressing, 2)]
+    [InlineData(Argon2Type.DataIndependentAddressing, 1)]
+    [InlineData(Argon2Type.HybridAddressing, 2)]
+    public void HashZeroesScratch(Argon2Type type, int threads)
+    {
+        var config = Config(type, Argon2Version.Nineteen);
+        config.Threads = threads;
+        using var memory = new Argon2Memory(config, Argon2MemoryPolicy.NoShrink, null);
+        Assert.True(Argon2.Hash(memory).Length > 0);
+        Assert.Equal(new byte[memory.Argon2WorkingBuffer.Length], memory.Argon2WorkingBuffer.ToArray());
+
+        int scratchLength = (type == Argon2Type.DataDependentAddressing ? 2 : 6) * Argon2.QwordsInBlock;
+        int threadLength = memory.FillMemoryBlocksWorkingBufferLength / threads;
+        for (int t = 0; t < threads; ++t)
+        {
+            Assert.Equal(new ulong[scratchLength], memory.FillMemoryBlocksWorkingBuffer.Slice(t * threadLength, scratchLength).ToArray());
+        }
+    }
+
     private static unsafe bool IsLocked<T>(System.Collections.Generic.Dictionary<IntPtr, nuint> locked, Span<T> span)
         where T : unmanaged
     {
