@@ -234,6 +234,35 @@ public class SecureArrayTests
     }
 
     /// <summary>
+    /// Zero on stack memory: the real (default) call zeroes exactly the span,
+    /// and leaves the stack bytes on both sides of it alone.
+    /// </summary>
+    [Fact]
+    public void ZeroStackallocSpan()
+    {
+        Span<byte> bytes = stackalloc byte[64];
+        bytes.Fill(0xA5);
+        SecureArray.Zero(bytes.Slice(8, 48));
+        Assert.True(bytes.Slice(0, 8).IndexOfAnyExcept((byte)0xA5) < 0);
+        Assert.True(bytes.Slice(8, 48).IndexOfAnyExcept((byte)0) < 0);
+        Assert.True(bytes.Slice(56).IndexOfAnyExcept((byte)0xA5) < 0);
+
+        Span<ulong> words = stackalloc ulong[129];
+        words.Fill(ulong.MaxValue);
+        SecureArray.Zero(words, SecureArray.DefaultCall);
+        Assert.True(words.IndexOfAnyExcept(0UL) < 0);
+
+        Span<int> ints = stackalloc int[3];
+        ints.Fill(-1);
+        SecureArray.Zero(ints.Slice(1, 1), new FakeCall(lockLimit: int.MaxValue));
+        Assert.Equal(-1, ints[0]);
+        Assert.Equal(0, ints[1]);
+        Assert.Equal(-1, ints[2]);
+
+        SecureArray.Zero(Span<long>.Empty);
+    }
+
+    /// <summary>
     /// The exception's constructors.
     /// </summary>
     [Fact]

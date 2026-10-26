@@ -251,6 +251,53 @@ public class Argon2ApiTests
     }
 
     /// <summary>
+    /// With <see cref="Argon2MemoryPolicy.Shrink"/>, a reset to a smaller memory
+    /// cost releases the block memory it no longer needs; with
+    /// <see cref="Argon2MemoryPolicy.NoShrink"/>, it keeps it. Both still hash
+    /// correctly after the reset. Checked for plain arrays (no lock policy) and
+    /// for secure arrays (pinned, and locked if possible).
+    /// </summary>
+    /// <param name="policy">The shrink policy.</param>
+    /// <param name="lockPolicy">The lock policy; null for plain arrays.</param>
+    [Theory]
+    [InlineData(Argon2MemoryPolicy.Shrink, null)]
+    [InlineData(Argon2MemoryPolicy.NoShrink, null)]
+    [InlineData(Argon2MemoryPolicy.Shrink, LockMemoryPolicy.None)]
+    [InlineData(Argon2MemoryPolicy.NoShrink, LockMemoryPolicy.None)]
+    [InlineData(Argon2MemoryPolicy.Shrink, LockMemoryPolicy.BestEffort)]
+    [InlineData(Argon2MemoryPolicy.NoShrink, LockMemoryPolicy.BestEffort)]
+    public void ShrinkPolicyCapacity(Argon2MemoryPolicy policy, LockMemoryPolicy? lockPolicy)
+    {
+        var big = Config(Argon2Type.HybridAddressing, Argon2Version.Nineteen);
+        big.MemoryCost = 4096;
+        using var memory = new Argon2Memory(big, policy, lockPolicy);
+        Assert.Equal(4096, memory.BlockCount);
+        Assert.Equal(4096, BlockCapacity(memory));
+        Assert.Equal(Argon2.Hash(big), Argon2.Hash(memory));
+
+        var small = Config(Argon2Type.HybridAddressing, Argon2Version.Nineteen);
+        small.MemoryCost = 64;
+        memory.Reset(small);
+        Assert.Equal(64, memory.BlockCount);
+        Assert.Equal(policy == Argon2MemoryPolicy.Shrink ? 64 : 4096, BlockCapacity(memory));
+        Assert.Equal(Argon2.Hash(small), Argon2.Hash(memory));
+
+        // Back up: both policies grow again.
+        memory.Reset(big);
+        Assert.Equal(4096, BlockCapacity(memory));
+        Assert.Equal(Argon2.Hash(big), Argon2.Hash(memory));
+
+        static int BlockCapacity(Argon2Memory memory)
+        {
+            // The allocated block arrays, not the BlockCount in use.
+            var field = typeof(Argon2Memory).GetField("blockMemories", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Argon2Memory has no blockMemories field: update this test.");
+            var memories = Assert.IsType<System.Collections.Generic.List<Memory<ulong>>>(field.GetValue(memory));
+            return memories.Sum(m => m.Length) / 128;
+        }
+    }
+
+    /// <summary>
     /// ClearPassword and ClearSecret wipe the copies Argon2 hashed from.
     /// </summary>
     [Fact]

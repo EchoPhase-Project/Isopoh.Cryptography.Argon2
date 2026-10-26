@@ -42,7 +42,7 @@ public class Argon2TestVectorTypeBasicCheck
                 Secret = argon2TestVector.Secret == null ? null : Encoding.ASCII.GetBytes(argon2TestVector.Secret),
                 AssociatedData = argon2TestVector.AssociatedData == null ? null : Encoding.ASCII.GetBytes(argon2TestVector.AssociatedData),
                 HashLength = argon2TestVector.TagLength,
-                Version = Argon2Version.Nineteen,
+                Version = argon2TestVector.Version,
                 Type = argon2TestVector.Type,
                 SecureArrayCall = SecureArray.DefaultCall,
             };
@@ -65,7 +65,7 @@ public class Argon2TestVectorTypeBasicCheck
             }
             else
             {
-                Console.WriteLine(
+                output.WriteLine(
                     $"Test {checkNumber}: Got{nl}" +
                     $"  {text}{nl}" +
                     $"expected{nl}" +
@@ -77,7 +77,9 @@ public class Argon2TestVectorTypeBasicCheck
         // ReSharper disable once CatchAllClause
         catch (Exception e)
         {
-            output.WriteLine($"Test x: {e.Message} ({e.GetType()})");
+            // An exception is a failure, not a pass.
+            output.WriteLine($"Test {checkNumber}: {e.Message} ({e.GetType()})");
+            return false;
         }
 
         return true;

@@ -232,6 +232,63 @@ public class Blake2BTests
         Assert.Equal(4096, tree.LeafSize);
     }
 
+    /// <summary>
+    /// Inputs at and around the 128-byte block size, where the last block is
+    /// full and must be compressed as the final block, not as a middle one.
+    /// Expected values from Python's hashlib.blake2b (key: bytes 0..63).
+    /// </summary>
+    /// <param name="length">The input length: bytes 0, 1, ... length - 1.</param>
+    /// <param name="keyed">Whether to use the 64-byte key.</param>
+    /// <param name="expected">The expected 64-byte digest in hexadecimal.</param>
+    [Theory]
+    [InlineData(127, false, "b6292669ccd38d5f01caae96ba272c76a879a45743afa0725d83b9ebb26665b731f1848c52f11972b6644f554c064fa90780dbbbf3a89d4fc31f67df3e5857ef")]
+    [InlineData(127, true, "76d2d819c92bce55fa8e092ab1bf9b9eab237a25267986cacf2b8ee14d214d730dc9a5aa2d7b596e86a1fd8fa0804c77402d2fcd45083688b218b1cdfa0dcbcb")]
+    [InlineData(128, false, "2319e3789c47e2daa5fe807f61bec2a1a6537fa03f19ff32e87eecbfd64b7e0e8ccff439ac333b040f19b0c4ddd11a61e24ac1fe0f10a039806c5dcc0da3d115")]
+    [InlineData(128, true, "72065ee4dd91c2d8509fa1fc28a37c7fc9fa7d5b3f8ad3d0d7a25626b57b1b44788d4caf806290425f9890a3a2a35a905ab4b37acfd0da6e4517b2525c9651e4")]
+    [InlineData(129, false, "f59711d44a031d5f97a9413c065d1e614c417ede998590325f49bad2fd444d3e4418be19aec4e11449ac1a57207898bc57d76a1bcf3566292c20c683a5c4648f")]
+    [InlineData(129, true, "64475dfe7600d7171bea0b394e27c9b00d8e74dd1e416a79473682ad3dfdbb706631558055cfc8a40e07bd015a4540dcdea15883cbbf31412df1de1cd4152b91")]
+    [InlineData(256, false, "1ecc896f34d3f9cac484c73f75f6a5fb58ee6784be41b35f46067b9c65c63a6794d3d744112c653f73dd7deb6666204c5a9bfa5b46081fc10fdbe7884fa5cbf8")]
+    [InlineData(256, true, "b72071e096277edebb8ee5134dd3714996307ba3a55aa4733d412abbe28e909e10e57e6fbfb4ef53b3b960518294ff889a90829254412e2a60b85add07a3674f")]
+    public void BlockBoundaryLengths(int length, bool keyed, string expected)
+    {
+        byte[] data = Enumerable.Range(0, length).Select(i => (byte)i).ToArray();
+        Blake2BConfig Config() => keyed ? new Blake2BConfig { Key = Key64 } : new Blake2BConfig();
+
+        Assert.Equal(expected, Hex(Blake2B.ComputeHash(data, Config(), Call)));
+        Assert.Equal(expected, Hex(Blake2B.ComputeHash(data, Config(), new byte[Blake2B.BufferMinimumTotalSize])));
+
+        // Incremental: the whole input at once, then pieces that end exactly
+        // on and just past a block boundary, then one byte at a time.
+        int boundary = Math.Min(128, length);
+        int[][] splits =
+        {
+            new[] { length },
+            new[] { length / 2, length - (length / 2) },
+            new[] { boundary, length - boundary },
+            new[] { 1, length - 1 },
+        };
+        foreach (int[] split in splits)
+        {
+            using Hasher hasher = Blake2B.Create(Config(), Call);
+            int offset = 0;
+            foreach (int count in split)
+            {
+                hasher.Update(data, offset, count);
+                offset += count;
+            }
+
+            Assert.Equal(expected, Hex(hasher.Finish()));
+        }
+
+        using Hasher byteAtATime = Blake2B.Create(Config(), Call);
+        foreach (byte b in data)
+        {
+            byteAtATime.Update(new[] { b });
+        }
+
+        Assert.Equal(expected, Hex(byteAtATime.Finish()));
+    }
+
     private static string Hex(Memory<byte> bytes) => Hex(bytes.ToArray());
 
     private static string Hex(byte[] bytes) => Convert.ToHexString(bytes).ToLowerInvariant();
