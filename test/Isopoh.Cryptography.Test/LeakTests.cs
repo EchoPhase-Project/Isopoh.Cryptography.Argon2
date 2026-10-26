@@ -8,6 +8,7 @@ namespace Isopoh.Cryptography.Test;
 
 using System;
 using System.Runtime;
+using System.Threading;
 using Isopoh.Cryptography.Argon2;
 using TestLib;
 using Xunit;
@@ -22,6 +23,11 @@ using Xunit.Abstractions;
 [Collection(LeakTestCollection.Name)]
 public class LeakTests
 {
+    /// <summary>
+    /// The allocation budget of a region without garbage collection.
+    /// </summary>
+    private const long NoGCBudget = 64L * 1024 * 1024;
+
     private readonly ITestOutputHelper output;
 
     /// <summary>
@@ -58,8 +64,12 @@ public class LeakTests
     /// such as wait handles that it did not dispose. With no garbage
     /// collection during the hashes, one forced collection afterwards finds
     /// every object that needs finalization. The finalization queue covers the
-    /// whole process, so the test subtracts the count after an empty loop and
-    /// keeps the smallest difference of up to three attempts.
+    /// whole process, and a batch of parallel work can have a constant cost
+    /// that is not a leak (on CI, the same 8 runtime objects after 32 or 64
+    /// hashes). Thus the test compares a batch of 32 hashes with a batch of
+    /// 64 hashes. A leak grows with the count of hashes, and a constant cost
+    /// for each batch cancels. The test keeps the smallest growth of up to
+    /// three attempts.
     /// </summary>
     [Fact]
     public void ParallelHashLeavesNothingToFinalize()
@@ -70,41 +80,37 @@ public class LeakTests
         byte[] password = { 1, 2, 3, 4 };
         byte[] salt = new byte[16];
 
-        // Warm up.
-        Hash();
+        // Warm up with the same loop that the test measures.
+        Hashes(hashes);
 
-        long? minDelta = null;
+        long? minGrowth = null;
         for (int attempt = 1; attempt <= attempts; ++attempt)
         {
-            long? baseline = PendingAfter(() => { }, out string baselineFailure);
-            long? withHashes = PendingAfter(
-                () =>
-                {
-                    for (int i = 0; i < hashes; ++i)
-                    {
-                        Hash();
-                    }
-                },
-                out string hashesFailure);
-            if (baseline is null || withHashes is null)
+            long? baseline = this.PendingAfter(() => { }, out string baselineFailure);
+            long? small = this.PendingAfter(() => Hashes(hashes), out string smallFailure);
+            long? large = this.PendingAfter(() => Hashes(2 * hashes), out string largeFailure);
+            string delta = baseline is null || small is null ? "unknown" : (small - baseline).ToString();
+            if (small is null || large is null)
             {
                 this.output.WriteLine(
-                    $"Attempt {attempt}: invalid. Baseline: {baseline?.ToString() ?? baselineFailure}; "
-                    + $"with hashes: {withHashes?.ToString() ?? hashesFailure}.");
+                    $"Attempt {attempt}: invalid. {hashes} hashes: {small?.ToString() ?? smallFailure}; "
+                    + $"{2 * hashes} hashes: {large?.ToString() ?? largeFailure}; "
+                    + $"empty loop: {baseline?.ToString() ?? baselineFailure}.");
                 continue;
             }
 
-            long delta = withHashes.Value - baseline.Value;
+            long growth = large.Value - small.Value;
             this.output.WriteLine(
-                $"Attempt {attempt}: valid. Baseline {baseline}, with hashes {withHashes}, delta {delta}.");
-            minDelta = minDelta is null ? delta : Math.Min(minDelta.Value, delta);
-            if (minDelta < lanes)
+                $"Attempt {attempt}: valid. {hashes} hashes {small}, {2 * hashes} hashes {large}, growth {growth}; "
+                + $"empty loop {baseline?.ToString() ?? baselineFailure}, delta to {hashes} hashes {delta}.");
+            minGrowth = minGrowth is null ? growth : Math.Min(minGrowth.Value, growth);
+            if (minGrowth < lanes)
             {
                 break;
             }
         }
 
-        if (minDelta is null)
+        if (minGrowth is null)
         {
             // xUnit 2 has no runtime skip. The environment did not allow a
             // measurement, which says nothing about the code.
@@ -112,25 +118,29 @@ public class LeakTests
             return;
         }
 
-        // Each hash used to leave one wait handle for each thread: 256 here.
+        // Each hash used to leave one wait handle for each thread: 256 more
+        // for the larger batch.
         Assert.True(
-            minDelta < lanes,
-            $"{minDelta} more objects to finalize after {hashes} hashes with {lanes} threads than after an empty loop.");
+            minGrowth < lanes,
+            $"{minGrowth} more objects to finalize after {2 * hashes} hashes than after {hashes} hashes, with {lanes} threads.");
 
-        void Hash()
+        void Hashes(int count)
         {
-            var config = new Argon2Config
+            for (int i = 0; i < count; ++i)
             {
-                Type = Argon2Type.HybridAddressing,
-                TimeCost = 1,
-                MemoryCost = 64,
-                Lanes = lanes,
-                Threads = lanes,
-                Password = password,
-                Salt = salt,
-            };
-            using var argon2 = new Argon2(config);
-            _ = argon2.Hash();
+                var config = new Argon2Config
+                {
+                    Type = Argon2Type.HybridAddressing,
+                    TimeCost = 1,
+                    MemoryCost = 64,
+                    Lanes = lanes,
+                    Threads = lanes,
+                    Password = password,
+                    Salt = salt,
+                };
+                using var argon2 = new Argon2(config);
+                _ = argon2.Hash();
+            }
         }
     }
 
@@ -144,7 +154,7 @@ public class LeakTests
     /// The count, or null if the region without garbage collection did not
     /// hold for all of <paramref name="body"/>.
     /// </returns>
-    private static long? PendingAfter(Action body, out string failure)
+    private long? PendingAfter(Action body, out string failure)
     {
         // Empty the finalization queue.
         GC.Collect();
@@ -152,12 +162,14 @@ public class LeakTests
         GC.Collect();
         GC.WaitForPendingFinalizers();
 
-        if (!GC.TryStartNoGCRegion(64L * 1024 * 1024))
+        if (!GC.TryStartNoGCRegion(NoGCBudget))
         {
             failure = "the region without garbage collection did not start";
             return null;
         }
 
+        int threadsBefore = ThreadPool.ThreadCount;
+        long allocatedBefore = GC.GetTotalAllocatedBytes(true);
         bool survived;
         try
         {
@@ -172,6 +184,8 @@ public class LeakTests
             }
         }
 
+        long allocated = GC.GetTotalAllocatedBytes(true) - allocatedBefore;
+        int threadsAfter = ThreadPool.ThreadCount;
         if (!survived)
         {
             failure = "the region without garbage collection ended before the loop finished";
@@ -181,6 +195,9 @@ public class LeakTests
         GC.Collect();
         long pending = GC.GetGCMemoryInfo().FinalizationPendingCount;
         GC.WaitForPendingFinalizers();
+        this.output.WriteLine(
+            $"  Pending {pending}; allocated {allocated / 1024} KiB of {NoGCBudget / 1024} KiB; "
+            + $"pool threads {threadsBefore} -> {threadsAfter}.");
         failure = string.Empty;
         return pending;
     }
