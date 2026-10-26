@@ -25,6 +25,9 @@ public static class DecodeExtension
     /// note this is shorter than allowed by the Argon2 algorithm but is
     /// limited by the phc-sf-spec string specification), hash (12-64 bytes or
     /// 16-86 characters - note Argon2 can actually output any length).
+    ///
+    /// The keyid and data values, when present, must not be empty (the
+    /// encoder omits empty values).
     /// </summary>
     private const string Argon2Match =
         @"^
@@ -33,8 +36,8 @@ public static class DecodeExtension
             \$m=(?<memory>\d+)
             ,t=(?<time>\d+)
             ,p=(?<parallel>\d+)
-            (?:,keyid=(?<keyid>(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw](?:==)?|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=?)))?
-            (?:,data=(?<data>(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw](?:==)?|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=?)))?
+            (?:,keyid=(?<keyid>(?=[A-Za-z0-9+/])(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw](?:==)?|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=?)?))?
+            (?:,data=(?<data>(?=[A-Za-z0-9+/])(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw](?:==)?|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=?)?))?
             (?:\$(?<salt>(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw](?:==)?|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=?)?)
                  (?:\$(?<digest>(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw](==)?|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=?)?))?)?
         $";
@@ -292,8 +295,19 @@ public static class DecodeExtension
             return false;
         }
 
-        if (!TryGetAssociatedData(
+        if (!TryGetOptionalBase64(
             str,
+            ",keyid=",
+            ref pos,
+            out byte[]? keyIdentifier))
+        {
+            hash = null;
+            return false;
+        }
+
+        if (!TryGetOptionalBase64(
+            str,
+            ",data=",
             ref pos,
             out byte[]? associatedData))
         {
@@ -309,6 +323,7 @@ public static class DecodeExtension
             config.Lanes = (int)lanes;
             config.Threads = (int)lanes;
             config.AssociatedData = associatedData;
+            config.KeyIdentifier = keyIdentifier;
             config.Version = version;
             hash = null;
             return true;
@@ -330,6 +345,7 @@ public static class DecodeExtension
             config.Threads = (int)lanes;
             config.Salt = salt;
             config.AssociatedData = associatedData;
+            config.KeyIdentifier = keyIdentifier;
             config.Version = version;
             hash = null;
             return true;
@@ -375,6 +391,7 @@ public static class DecodeExtension
             config.Threads = (int)lanes;
             config.Salt = salt;
             config.AssociatedData = associatedData;
+            config.KeyIdentifier = keyIdentifier;
             config.Version = version;
             hash = output;
             success = true;
@@ -389,19 +406,35 @@ public static class DecodeExtension
         }
     }
 
-    private static bool TryGetAssociatedData(
+    /// <summary>
+    /// Decode an optional Base64 field such as ",keyid=" or ",data=".
+    /// </summary>
+    /// <param name="str">The Argon2 hash string.</param>
+    /// <param name="check">The field prefix, for example ",keyid=".</param>
+    /// <param name="pos">
+    /// Where to look for the field. Moved past the field if it is present.
+    /// </param>
+    /// <param name="value">
+    /// The decoded value; null if the field is not present.
+    /// </param>
+    /// <returns>
+    /// True if the field is not present or decodes to a non-empty value; false
+    /// otherwise. The encoder omits empty values, so an empty value is invalid.
+    /// </returns>
+    private static bool TryGetOptionalBase64(
         string str,
+        string check,
         ref int pos,
-        out byte[]? associatedData)
+        out byte[]? value)
     {
-        const string check = ",data=";
-        associatedData = null;
+        value = null;
         if (string.Compare(str, pos, check, 0, check.Length, StringComparison.Ordinal) == 0)
         {
             pos += check.Length;
-            pos = FromBase64(out associatedData, str, pos);
-            if (pos < 0)
+            pos = FromBase64(out value, str, pos);
+            if (pos < 0 || value == null || value.Length == 0)
             {
+                value = null;
                 return false;
             }
         }

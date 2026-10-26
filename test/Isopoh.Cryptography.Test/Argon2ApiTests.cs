@@ -24,6 +24,29 @@ public class Argon2ApiTests
     private static readonly byte[] Salt = Encoding.UTF8.GetBytes("somesaltsomesalt");
 
     /// <summary>
+    /// Gets key id and associated data lengths: each of 1 to 9 bytes alone (so every
+    /// Base64 remainder, including none), and some pairs.
+    /// </summary>
+    public static TheoryData<int, int> KeyIdAndDataLengths
+    {
+        get
+        {
+            var data = new TheoryData<int, int>();
+            for (int i = 1; i <= 9; ++i)
+            {
+                data.Add(i, 0);
+                data.Add(0, i);
+            }
+
+            data.Add(3, 3);
+            data.Add(6, 9);
+            data.Add(8, 32);
+            data.Add(1, 2);
+            return data;
+        }
+    }
+
+    /// <summary>
     /// A full encoded hash decodes into the configuration that produced it, for each type and version.
     /// </summary>
     /// <param name="type">Argon2 variant.</param>
@@ -356,6 +379,66 @@ public class Argon2ApiTests
         Assert.False(config.DecodeString("$argon2id$v=", out _));
         Assert.False(config.DecodeString("$argon2id$v=19$m=32,t=1,p=1$A", out _));
         Assert.False(config.DecodeString("$argon2id$v=19$m=32,t=1,p=1$c29tZXNhbHRzb21lc2FsdA$AAAAA", out _));
+    }
+
+    /// <summary>
+    /// A hash with a key id, associated data or both verifies through each
+    /// decoder, and decodes back to the same key id and data.
+    /// </summary>
+    /// <param name="keyIdLength">Length of the key id; 0 for none.</param>
+    /// <param name="dataLength">Length of the associated data; 0 for none.</param>
+    [Theory]
+    [MemberData(nameof(KeyIdAndDataLengths))]
+    public void KeyIdAndDataVerify(int keyIdLength, int dataLength)
+    {
+        byte[] keyId = Enumerable.Range(1, keyIdLength).Select(i => (byte)(i * 37)).ToArray();
+        byte[] data = Enumerable.Range(1, dataLength).Select(i => (byte)(i * 11)).ToArray();
+        var config = Config(Argon2Type.HybridAddressing, Argon2Version.Nineteen);
+        config.Lanes = 1;
+        config.Threads = 1;
+        config.KeyIdentifier = keyIdLength == 0 ? null : keyId;
+        config.AssociatedData = dataLength == 0 ? null : data;
+        string encoded = Argon2.Hash(config);
+        Assert.Equal(keyIdLength > 0, encoded.Contains(",keyid=", StringComparison.Ordinal));
+        Assert.Equal(dataLength > 0, encoded.Contains(",data=", StringComparison.Ordinal));
+
+        Assert.True(Argon2.Verify(encoded, "password"));
+        Assert.False(Argon2.Verify(encoded, "wrong"));
+
+        var decoded = new Argon2Config();
+        Assert.True(decoded.DecodeString(encoded, out var hash));
+        using (hash)
+        {
+            Assert.Equal(keyId, decoded.KeyIdentifier ?? Array.Empty<byte>());
+            Assert.Equal(data, decoded.AssociatedData ?? Array.Empty<byte>());
+            Assert.Equal(Salt, decoded.Salt);
+            Assert.Equal(20, hash!.Buffer.Length);
+        }
+
+        Assert.Equal((keyIdLength, dataLength, Salt.Length, 20), encoded.Argon2RequiredBufferLengths());
+        using var memory = new Argon2Memory(Config(Argon2Type.HybridAddressing, Argon2Version.Nineteen), Argon2MemoryPolicy.NoShrink, null);
+        Assert.True(Argon2.Verify(encoded, memory));
+        Assert.Equal(keyId, memory.KeyIdentifier.ToArray());
+        Assert.Equal(data, memory.AssociatedData.ToArray());
+        memory.Reset(encoded, new Argon2Password(Encoding.UTF8.GetBytes("wrong")));
+        Assert.False(Argon2.Verify(encoded, memory));
+    }
+
+    /// <summary>
+    /// An empty key id or data field is refused by both decoders: the encoder omits empty values.
+    /// </summary>
+    /// <param name="field">The field to leave empty.</param>
+    [Theory]
+    [InlineData("keyid")]
+    [InlineData("data")]
+    public void EmptyKeyIdOrDataRefused(string field)
+    {
+        string encoded = $"$argon2id$v=19$m=32,t=1,p=1,{field}=$c29tZXNhbHRzb21lc2FsdA$AAAAAAAAAAAAAAAAAAAAAA";
+        Assert.False(new Argon2Config().DecodeString(encoded, out var hash));
+        Assert.Null(hash);
+        using var memory = new Argon2Memory(Config(Argon2Type.HybridAddressing, Argon2Version.Nineteen), Argon2MemoryPolicy.NoShrink, null);
+        Assert.Throws<ArgumentException>(() => memory.DecodeString(encoded));
+        Assert.Throws<ArgumentException>(() => encoded.Argon2RequiredBufferLengths());
     }
 
     private static Argon2Config Config(Argon2Type type, Argon2Version version) => new()
