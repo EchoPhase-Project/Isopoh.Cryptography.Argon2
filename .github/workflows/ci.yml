@@ -7,17 +7,33 @@ on:
   workflow_dispatch:
     inputs:
       run_full_tests:
-        description: Run the long-running managed test suite
+        description: Run the long-running managed test suite (Slow and HighMemory tests included)
         required: false
         type: boolean
         default: false
 
+# A new push to a pull request cancels the run for the previous push.
+# Runs on main are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The fast suite: everything except the >2 GiB test and the timing report.
+  # It includes the generated reference vectors, the edge-parameter KATs,
+  # the FillBlock kernel cross-check and the leak tests.
+  FAST_TEST_FILTER: Category!=HighMemory&Category!=Slow
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
 jobs:
   build-and-test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -51,11 +67,28 @@ jobs:
       - name: Build native reference implementation
         run: cmake --build --preset release-build --target argon2
 
+      # The test vector source generator runs the native reference binary at
+      # build time. Point it at the binary explicitly, before any dotnet
+      # command starts the compiler server (which keeps its environment).
+      - name: Locate native reference binary
+        shell: bash
+        run: |
+          exe="Reference/bin/Release/argon2"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then exe="$exe.exe"; fi
+          test -f "$exe" || { echo "::error::$exe was not built"; exit 1; }
+          echo "REFERENCE_RUN_PATH=$GITHUB_WORKSPACE/$exe" >> "$GITHUB_ENV"
+
+      - name: Show CPU vector extensions (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          echo "AVX2:    $(grep -o -m1 'avx2' /proc/cpuinfo || echo none)"
+          echo "AVX-512: $(grep -o -m1 'avx512f' /proc/cpuinfo || echo none)"
+
       - name: Build .NET 10 libraries with AOT analysis
         run: dotnet build lib/Isopoh.Cryptography.Argon2/Isopoh.Cryptography.Argon2.csproj -c Release -f net10.0 -p:GeneratePackageOnBuild=false
 
-      - name: Run fast correctness regression tests
-        run: dotnet test test/Isopoh.Cryptography.Test/Isopoh.Cryptography.Test.csproj -c Release --filter "ConfigHashGeneratesSaltWhenMissing|AssociatedDataRoundTripsDuringVerification" -p:GeneratePackageOnBuild=false
+      - name: Run fast test suite
+        run: dotnet test test/Isopoh.Cryptography.Test/Isopoh.Cryptography.Test.csproj -c Release --filter "${{ env.FAST_TEST_FILTER }}" -p:GeneratePackageOnBuild=false
 
       - name: Publish Native AOT smoke test (Linux)
         if: runner.os == 'Linux'
@@ -91,9 +124,86 @@ jobs:
         if: runner.os == 'macOS'
         run: ./test/AotSmokeTest/bin/Release/net10.0/${{ env.MACOS_RID }}/publish/AotSmokeTest
 
+  # Run the fast suite again with some SIMD paths disabled, so that each
+  # FillBlock path (AVX-512, AVX2, portable Vector128/scalar) is checked
+  # against the reference vectors. The default run in build-and-test covers
+  # the best path of the runner. The hardware AVX-512 path runs only on
+  # runners whose CPU supports AVX-512 (see the "Show CPU" step); on other
+  # runners the AVX-512 kernel test uses the portable Vector512 fallback.
+  #
+  # Knob names (checked in dotnet/runtime release/9.0 and release/10.0,
+  # clrconfigvalues.h): EnableHWIntrinsic, EnableAVX2 and
+  # PreferredVectorBitWidth exist in both. The tests run on .NET 9 (net9.0).
+  # The AVX-512 enable knob differs (.NET 9: EnableAVX512F, .NET 10:
+  # EnableAVX512), so the AVX2 run uses PreferredVectorBitWidth=256 instead:
+  # it makes Vector512.IsHardwareAccelerated false, which turns off the
+  # AVX-512 FillBlock path (UseAvx512) in both runtimes.
+  simd-paths:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            9.0.x
+            10.0.x
+
+      - name: "Configure CMake (CMake build preset: release)"
+        run: cmake --preset release
+
+      - name: Build native reference implementation
+        run: cmake --build --preset release-build --target argon2
+
+      - name: Locate native reference binary
+        run: |
+          test -f Reference/bin/Release/argon2
+          echo "REFERENCE_RUN_PATH=$GITHUB_WORKSPACE/Reference/bin/Release/argon2" >> "$GITHUB_ENV"
+
+      - name: Show CPU vector extensions
+        run: |
+          echo "AVX2:    $(grep -o -m1 'avx2' /proc/cpuinfo || echo none)"
+          echo "AVX-512: $(grep -o -m1 'avx512f' /proc/cpuinfo || echo none)"
+
+      # Build once without the knobs; the test runs below only set them for
+      # the test host.
+      - name: Build tests
+        run: dotnet build test/Isopoh.Cryptography.Test/Isopoh.Cryptography.Test.csproj -c Release -p:GeneratePackageOnBuild=false
+
+      - name: Fast suite, AVX-512 off (AVX2 path)
+        if: ${{ !cancelled() }}
+        env:
+          DOTNET_PreferredVectorBitWidth: 256
+        run: dotnet test test/Isopoh.Cryptography.Test/Isopoh.Cryptography.Test.csproj -c Release --no-build --filter "${{ env.FAST_TEST_FILTER }}"
+
+      - name: Fast suite, AVX2 off (Vector128 path)
+        if: ${{ !cancelled() }}
+        env:
+          DOTNET_EnableAVX2: 0
+        run: dotnet test test/Isopoh.Cryptography.Test/Isopoh.Cryptography.Test.csproj -c Release --no-build --filter "${{ env.FAST_TEST_FILTER }}"
+
+      - name: Fast suite, all hardware intrinsics off (scalar path)
+        if: ${{ !cancelled() }}
+        env:
+          DOTNET_EnableHWIntrinsic: 0
+        run: dotnet test test/Isopoh.Cryptography.Test/Isopoh.Cryptography.Test.csproj -c Release --no-build --filter "${{ env.FAST_TEST_FILTER }}"
+
+  # The whole suite, with the Slow and HighMemory tests. The release-test
+  # preset runs "dotnet test" on all projects without a filter. The
+  # HighMemory test needs more than 2 GiB; ubuntu-latest (public
+  # repositories) has 16 GiB, which is enough.
   full-managed-tests:
     if: github.event_name == 'workflow_dispatch' && inputs.run_full_tests
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -109,6 +219,11 @@ jobs:
           dotnet-version: |
             9.0.x
             10.0.x
+
+      - name: Show runner memory and CPU
+        run: |
+          free -h
+          echo "AVX-512: $(grep -o -m1 'avx512f' /proc/cpuinfo || echo none)"
 
       - name: Configure release build
         run: cmake --preset release

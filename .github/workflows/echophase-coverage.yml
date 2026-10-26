@@ -85,18 +85,19 @@ jobs:
           </RunSettings>
           XML
 
-      # The managed suite without three tests that measure rather than check,
+      # The managed suite without the tests that measure rather than check,
       # and that coverage instrumentation (a counter on every line of the block
       # fill loops, ~40x slower) turns from seconds into tens of minutes:
-      # TestLeaking (process memory), TestParallelismTiming (timings) and
-      # TestHighMemoryCost (hashes ~16 GiB twice; also more than a hosted
+      # LeakTests (process memory and the finalization queue), Category=Slow
+      # (TestParallelismTiming, timings) and Category=HighMemory
+      # (TestHighMemoryCost, hashes ~16 GiB twice; also more than a hosted
       # runner's RAM). The upstream CI and local runs still cover them.
       - name: Tests with coverage
         shell: bash
         run: >
           dotnet test test/Isopoh.Cryptography.Test/Isopoh.Cryptography.Test.csproj
           -c Release -p:GeneratePackageOnBuild=false -p:UseSharedCompilation=false
-          --filter "FullyQualifiedName!~TestLeaking&FullyQualifiedName!~TestParallelismTiming&FullyQualifiedName!~TestHighMemoryCost"
+          --filter "FullyQualifiedName!~LeakTests&Category!=Slow&Category!=HighMemory"
           --collect:"XPlat Code Coverage" --settings coverage.runsettings
           --results-directory coverage
 
