@@ -23,7 +23,7 @@ message(STATUS "Found dotnet CLI: ${DOTNET_CLI}")
 set(DOTNET_ROOT_DIR "${CMAKE_SOURCE_DIR}" CACHE PATH "Path to root directory or solution file for dotnet restore/build/test")
 
 # If DOTNET_ROOT_DIR is not a solution file path, we'll generate _dotnet_build.sln in the repo root
-if(DOTNET_ROOT_DIR MATCHES "\\.sln$")
+if(DOTNET_ROOT_DIR MATCHES "\\.slnx?$")
   set(DOTNET_SOLUTION "${DOTNET_ROOT_DIR}")
 else()
   set(DOTNET_SOLUTION "${CMAKE_SOURCE_DIR}/_dotnet_build.sln")
@@ -67,6 +67,20 @@ foreach(cs_proj IN LISTS FILTERED_CS_PROJS)
     message(STATUS "    ${cs_proj}")
 endforeach()
 
+# Since the .NET 10 SDK, "dotnet new sln" writes _dotnet_build.slnx unless told
+# "--format sln". SDKs before 9.0.200 do not know the option and always write .sln.
+execute_process(
+  COMMAND ${DOTNET_CLI} new sln --help
+  OUTPUT_VARIABLE _dotnet_new_sln_help
+  ERROR_QUIET
+  RESULT_VARIABLE _dotnet_new_sln_result
+)
+if(_dotnet_new_sln_result EQUAL 0 AND _dotnet_new_sln_help MATCHES "--format")
+  set(DOTNET_NEW_SLN_FORMAT --format sln)
+else()
+  set(DOTNET_NEW_SLN_FORMAT)
+endif()
+
 # Target: generate a lightweight solution file named _dotnet_build.sln in the repo root.
 add_custom_target(generate-dotnet-sln
   COMMENT "Generating ${DOTNET_SOLUTION} containing all .csproj files"
@@ -76,8 +90,8 @@ add_custom_target(generate-dotnet-sln
 # remove old sln and create a new one; then add projects (POST_BUILD commands on the target)
 add_custom_command(TARGET generate-dotnet-sln
   PRE_BUILD
-  COMMAND ${CMAKE_COMMAND} -E remove -f ${DOTNET_SOLUTION}
-  COMMAND ${DOTNET_CLI} new sln -n _dotnet_build -o ${CMAKE_SOURCE_DIR}
+  COMMAND ${CMAKE_COMMAND} -E remove -f ${DOTNET_SOLUTION} ${CMAKE_SOURCE_DIR}/_dotnet_build.sln ${CMAKE_SOURCE_DIR}/_dotnet_build.slnx
+  COMMAND ${DOTNET_CLI} new sln -n _dotnet_build -o ${CMAKE_SOURCE_DIR} ${DOTNET_NEW_SLN_FORMAT}
   COMMENT "Creating ${DOTNET_SOLUTION}"
 )
 

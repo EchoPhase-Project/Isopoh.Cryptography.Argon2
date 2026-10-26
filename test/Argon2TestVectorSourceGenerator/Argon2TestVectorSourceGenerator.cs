@@ -63,6 +63,16 @@ public class Argon2TestVectorSourceGenerator : IIncrementalGenerator
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor GenerationFailed = new(
+#pragma warning disable RS2008
+        id: "A2TVSG002",
+#pragma warning restore RS2008
+        title: "Test vector generation failed",
+        messageFormat: "{0}",
+        category: "Argon2TestVectorSourceGenerator",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
     /// <summary>
     /// Called to initialize the generator and register generation steps via callbacks
     /// on the <paramref name="context"/>.
@@ -72,58 +82,77 @@ public class Argon2TestVectorSourceGenerator : IIncrementalGenerator
     {
         IncrementalValueProvider<Compilation> compilationProvider = context.CompilationProvider;
 
-        // Resolve the repository/solution directory
-        IncrementalValueProvider<string> solutionDir = compilationProvider.Select((_, _) => GetSolutionDir());
+        // Resolve the repository directory from the consuming project (the
+        // Argon2RepositoryRoot build property). The path of this source file,
+        // which the compiler fixed when it built the generator, is only the
+        // fallback: it can point to another copy of the repository.
+        IncrementalValueProvider<string> solutionDir = context.AnalyzerConfigOptionsProvider.Select(
+            (options, _) => options.GlobalOptions.TryGetValue("build_property.Argon2RepositoryRoot", out string? root) && !string.IsNullOrEmpty(root)
+                ? root
+                : GetSolutionDir());
 
         // Prefer environment variable REFERENCE_RUN_PATH (CI will set this), otherwise search for common binary names.
-        IncrementalValueProvider<string> argon2 = compilationProvider.Combine(solutionDir)
+        // Each step catches its failure and passes it on as an error, so the
+        // build fails with the reason and not with a silent empty vector list.
+        IncrementalValueProvider<(string? Path, string? Error)> argon2 = compilationProvider.Combine(solutionDir)
             .Select((x, _) =>
             {
                 string solutionDirectory = x.Right;
                 string? env = Environment.GetEnvironmentVariable("REFERENCE_RUN_PATH");
-                if (!string.IsNullOrEmpty(env) && File.Exists(env))
+                if (!string.IsNullOrEmpty(env))
                 {
-                    return env;
+                    return File.Exists(env)
+                        ? (env, null)
+                        : ((string?)null, $"REFERENCE_RUN_PATH is set to \"{env}\", but that file does not exist.");
                 }
 
                 var candidates = new[] { "run", "run.exe", "argon2", "argon2.exe" };
-                foreach (var name in candidates)
+                try
                 {
-                    var found = Directory.GetFiles(solutionDirectory, name, SearchOption.AllDirectories).FirstOrDefault();
-                    if (!string.IsNullOrEmpty(found))
+                    foreach (var name in candidates)
                     {
-                        return found;
+                        var found = Directory.GetFiles(solutionDirectory, name, SearchOption.AllDirectories).FirstOrDefault();
+                        if (!string.IsNullOrEmpty(found))
+                        {
+                            return (found, null);
+                        }
                     }
                 }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                {
+                    return (null, $"Cannot search {solutionDirectory} for the native reference binary: {e.Message}");
+                }
 
-                throw new Exception(
-                    $"Native reference binary not found. Set environment variable REFERENCE_RUN_PATH to the full path of the native binary, or place one of: {string.Join(", ", candidates)} under {solutionDirectory}");
+                return (null, $"Native reference binary not found. Set environment variable REFERENCE_RUN_PATH to the full path of the native binary, or place one of: {string.Join(", ", candidates)} under {solutionDirectory}");
             });
 
-        // validatedArgon2 now produces the found path plus a mutable List<string> that collects logs
-        IncrementalValueProvider<(string Path, List<string> Logs)> validatedArgon2 =
-            compilationProvider.Combine(argon2).Select((x, _) =>
-            {
-                var logs = new List<string>();
-
-                // pass a local reporter that appends to the logs list
-                Validate(msg => logs.Add(msg), x.Right);
-                return (x.Right, logs);
-            });
-
-        // Create vectors while appending any runtime messages to the logs list created above.
-        IncrementalValueProvider<(IEnumerable<string> Vectors, List<string> Logs)> textNewTestVectorList =
-            compilationProvider.Combine(validatedArgon2)
+        // Create the vectors (after a check against the official vectors), with the log of each run.
+        IncrementalValueProvider<(List<string> Vectors, List<string> Logs, string? Error)> textNewTestVectorList =
+            compilationProvider.Combine(argon2)
                 .Select((x, _) =>
                 {
-                    var argon2Path = x.Right.Path;
-                    var logs = x.Right.Logs;
+                    var logs = new List<string>();
+                    (string? argon2Path, string? error) = x.Right;
+                    if (argon2Path == null)
+                    {
+                        return (new List<string>(), logs, error);
+                    }
+
                     Action<string> report = s => logs.Add(s);
+                    try
+                    {
+                        Validate(report, argon2Path);
 
-                    var vectors = Argon2Parameters().Select(parameters =>
-                        TextNewTestVector(report, argon2Path, parameters));
-
-                    return (Vectors: vectors, Logs: logs);
+                        // ToList runs the reference binary here, inside the try.
+                        List<string> vectors = Argon2Parameters()
+                            .Select(parameters => TextNewTestVector(report, argon2Path, parameters))
+                            .ToList();
+                        return (vectors, logs, (string?)null);
+                    }
+                    catch (Exception e)
+                    {
+                        return (new List<string>(), logs, e.Message);
+                    }
                 });
 
         // Single output: add the generated source and report all collected diagnostics for this run.
@@ -134,6 +163,12 @@ public class Argon2TestVectorSourceGenerator : IIncrementalGenerator
             {
                 var diagnostic = Diagnostic.Create(LogMessage, location: null, msg);
                 productionContext.ReportDiagnostic(diagnostic);
+            }
+
+            if (value.Error != null)
+            {
+                productionContext.ReportDiagnostic(Diagnostic.Create(GenerationFailed, location: null, value.Error));
+                return;
             }
 
             // Add generated source
@@ -362,6 +397,7 @@ public class Argon2TestVectorSourceGenerator : IIncrementalGenerator
             FileName = argon2,
             WindowStyle = ProcessWindowStyle.Hidden,
             RedirectStandardOutput = true,
+            RedirectStandardError = true,
             Arguments = BuildCommandLineFromArgs(
                 salt,
                 type switch { Argon2TypeLocal.DataIndependentAddressing => "-i", Argon2TypeLocal.DataDependentAddressing => "-d", _ => "-id" },
@@ -382,9 +418,19 @@ public class Argon2TestVectorSourceGenerator : IIncrementalGenerator
                 output switch { Argon2OutputLocal.Raw => "-r", Argon2OutputLocal.Encoded => "-e", _ => null }),
         };
         using Process p = Process.Start(startInfo) ?? throw new Exception($"Failed to start {startInfo.FileName}");
+
+        // Read stderr on another thread: a full pipe would block the process.
+        var stderr = p.StandardError.ReadToEndAsync();
         string res = p.StandardOutput.ReadToEnd().TrimEnd('\r', '\n');
         p.WaitForExit();
+        string err = stderr.GetAwaiter().GetResult().Trim();
         reportDiagnostic($"Ran: {startInfo.FileName} {startInfo.Arguments}, got: {res}");
+        if (p.ExitCode != 0 || res.Length == 0)
+        {
+            throw new Exception(
+                $"Ran: {startInfo.FileName} {startInfo.Arguments}, exit code {p.ExitCode}, output \"{res}\", error output \"{err}\"");
+        }
+
         return res;
     }
 
@@ -402,6 +448,13 @@ public class Argon2TestVectorSourceGenerator : IIncrementalGenerator
         // branch escaped spaces as "\\ ", which split such arguments in two.
         foreach (string arg in args.Where(s => s != null).Cast<string>())
         {
+            if (arg.Length == 0)
+            {
+                // Without the quotes, an empty argument disappears and the ones after it shift.
+                result += (result.Length > 0 ? " " : string.Empty) + "\"\"";
+                continue;
+            }
+
             bool enclosedInApo = arg.LastIndexOfAny(
                 [' ', '\t', '|', '@', '^', '<', '>', '&']) >= 0;
             bool wasApo = enclosedInApo;
